@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "A powerful MCP server for email operations with IMAP and SMTP support, featuring automatic Claude Code integration"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "MIT"}
+license = "MIT"
 authors = [
     {name = "Mail MCP Team", email = "team@mail-mcp.dev"}
 ]
