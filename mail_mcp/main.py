@@ -6,7 +6,7 @@ import asyncio
 import json
 import logging
 import sys
-from typing import Optional
+from typing import Optional, List
 
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -109,6 +109,18 @@ class MailMCPServer:
                 await self.performance_monitor.stop()
         except Exception as e:
             logger.warning(f"Error during service cleanup: {e}")
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        """格式化文件大小为人类可读格式"""
+        if size_bytes == 0:
+            return "0 B"
+        
+        size_names = ["B", "KB", "MB", "GB", "TB"]
+        import math
+        i = int(math.floor(math.log(size_bytes, 1024)))
+        p = math.pow(1024, i)
+        s = round(size_bytes / p, 2)
+        return f"{s} {size_names[i]}"
 
     def register_tools(self):
         """Register MCP tools for v2.0"""
@@ -273,7 +285,153 @@ class MailMCPServer:
                 error_response = create_error_response(e)
                 return json.dumps(error_response, ensure_ascii=False)
 
-        logger.info("V2.0 MCP tools registered: check, reply, performance_stats")
+        @self.mcp.tool()
+        async def download_attachments(
+            message_id: str, 
+            filenames: Optional[List[str]] = None, 
+            save_path: str = "./downloads"
+        ) -> str:
+            """下载邮件附件到本地目录
+            
+            Args:
+                message_id: 邮件ID
+                filenames: 要下载的附件文件名列表，如果为空则下载所有附件
+                save_path: 保存路径，默认为./downloads
+                
+            Returns:
+                JSON格式的下载结果
+            """
+            logger.info(f"执行download_attachments工具：下载邮件 {message_id} 的附件")
+            
+            if not self.imap_service:
+                error_response = create_error_response(
+                    MailMCPError('IMAP服务未初始化，请检查配置')
+                )
+                return json.dumps(error_response, ensure_ascii=False)
+            
+            if not message_id or not message_id.strip():
+                error_response = create_error_response(
+                    MailMCPError('邮件ID不能为空')
+                )
+                return json.dumps(error_response, ensure_ascii=False)
+            
+            try:
+                import os
+                
+                # 确保保存目录存在
+                os.makedirs(save_path, exist_ok=True)
+                
+                # 获取邮件的所有附件列表
+                attachments = await self.imap_service.get_message_attachments(message_id)
+                
+                if not attachments:
+                    result = {
+                        "success": True,
+                        "message": f"邮件 {message_id} 没有附件",
+                        "downloaded_count": 0,
+                        "attachments": []
+                    }
+                    return json.dumps(result, ensure_ascii=False, indent=2)
+                
+                # 如果指定了文件名，则只下载指定的附件
+                if filenames:
+                    available_filenames = [att['filename'] for att in attachments]
+                    attachments_to_download = [
+                        att for att in attachments 
+                        if att['filename'] in filenames
+                    ]
+                    
+                    # 检查是否有不存在的文件名
+                    missing_files = [name for name in filenames if name not in available_filenames]
+                    if missing_files:
+                        logger.warning(f"以下附件不存在: {missing_files}")
+                else:
+                    attachments_to_download = attachments
+                
+                download_results = []
+                success_count = 0
+                
+                for attachment in attachments_to_download:
+                    filename = attachment['filename']
+                    file_path = os.path.join(save_path, filename)
+                    
+                    try:
+                        # 下载附件内容
+                        payload = await self.imap_service.download_attachment_payload(
+                            message_id, filename
+                        )
+                        
+                        if payload:
+                            # 处理文件名冲突
+                            counter = 1
+                            original_file_path = file_path
+                            while os.path.exists(file_path):
+                                name, ext = os.path.splitext(original_file_path)
+                                file_path = f"{name}_{counter}{ext}"
+                                counter += 1
+                            
+                            # 写入文件
+                            with open(file_path, 'wb') as f:
+                                f.write(payload)
+                            
+                            file_size = len(payload)
+                            success_count += 1
+                            
+                            download_results.append({
+                                "filename": filename,
+                                "status": "success",
+                                "file_path": file_path,
+                                "size_bytes": file_size,
+                                "size_human": self._format_file_size(file_size)
+                            })
+                            
+                            logger.info(f"成功下载附件: {filename} -> {file_path}")
+                        else:
+                            download_results.append({
+                                "filename": filename,
+                                "status": "failed",
+                                "error": "无法获取附件内容"
+                            })
+                            logger.warning(f"下载附件失败: {filename}")
+                    
+                    except Exception as e:
+                        download_results.append({
+                            "filename": filename,
+                            "status": "failed",
+                            "error": str(e)
+                        })
+                        logger.error(f"下载附件 {filename} 时发生错误: {e}")
+                
+                result = {
+                    "success": True,
+                    "message": f"完成下载，成功 {success_count}/{len(attachments_to_download)} 个附件",
+                    "downloaded_count": success_count,
+                    "total_count": len(attachments_to_download),
+                    "save_path": save_path,
+                    "attachments": download_results
+                }
+                
+                if filenames and missing_files:
+                    result["missing_files"] = missing_files
+                
+                logger.info(f"附件下载完成: {success_count}/{len(attachments_to_download)} 成功")
+                return json.dumps(result, ensure_ascii=False, indent=2)
+                
+            except MailMCPError as e:
+                log_error_with_context(e, context={
+                    "tool": "download_attachments",
+                    "message_id": message_id,
+                    "filenames": filenames,
+                    "save_path": save_path
+                })
+                error_response = create_error_response(e)
+                return json.dumps(error_response, ensure_ascii=False)
+            except Exception as e:
+                logger.error(f"download_attachments工具发生未预期错误: {e}", exc_info=True)
+                error_response = create_error_response(e)
+                return json.dumps(error_response, ensure_ascii=False)
+
+        logger.info("V2.0 MCP tools registered: check, reply, performance_stats, download_attachments")
 
     async def run(self, host: str = "localhost", port: int = 8000):
         """Run the MCP server"""
