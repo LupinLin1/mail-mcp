@@ -50,9 +50,9 @@ auto = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/mail-mcp/mail-mcp"
-Repository = "https://github.com/mail-mcp/mail-mcp"
-Issues = "https://github.com/mail-mcp/mail-mcp/issues"
+Homepage = "https://github.com/LupinLin1/mail-mcp"
+Repository = "https://github.com/LupinLin1/mail-mcp"
+Issues = "https://github.com/LupinLin1/mail-mcp/issues"
 Documentation = "https://mail-mcp.dev"
 
 [project.scripts]
