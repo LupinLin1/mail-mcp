@@ -1,0 +1,80 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mail-mcp"
+version = "0.1.0"
+description = "A powerful MCP server for email operations with IMAP and SMTP support, featuring automatic Claude Code integration"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "MIT"}
+authors = [
+    {name = "Mail MCP Team", email = "team@mail-mcp.dev"}
+]
+keywords = ["mcp", "email", "imap", "smtp", "claude", "claude-code", "automation"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Communications :: Email",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+dependencies = [
+    "fastmcp>=0.4.0",
+    "python-dotenv>=1.0.0",
+    "aiohttp>=3.8.0",
+    "click>=8.0.0",
+    "requests>=2.25.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "black>=23.0.0",
+    "isort>=5.0.0",
+    "flake8>=6.0.0",
+    "build>=0.10.0",
+    "twine>=4.0.0",
+]
+auto = [
+    "pyyaml>=6.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/mail-mcp/mail-mcp"
+Repository = "https://github.com/mail-mcp/mail-mcp"
+Issues = "https://github.com/mail-mcp/mail-mcp/issues"
+Documentation = "https://mail-mcp.dev"
+
+[project.scripts]
+mail-mcp = "mail_mcp.main:sync_main"
+mail-mcp-setup = "mail_mcp.setup:main"
+mail-mcp-config = "mail_mcp.config_tool:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["mail_mcp*"]
+
+[tool.black]
+line-length = 88
+target-version = ['py38']
+
+[tool.isort]
+profile = "black"
+line_length = 88
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+asyncio_mode = "auto"
