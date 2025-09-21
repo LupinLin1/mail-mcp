@@ -29,92 +29,75 @@
 - **测试覆盖**: 全面的单元测试覆盖
 - **日志记录**: 详细的操作日志和错误追踪
 
-## 安装和配置
+## 🚀 快速开始
 
-### 环境要求
-- Python 3.8+
-- FastMCP 框架
+### 使用 uvx (零安装配置)
 
-### 安装依赖
-```bash
-pip install fastmcp python-dotenv
+只需要创建一个 `.mcp.json` 配置文件即可，无需任何预安装：
+
+```json
+{
+  "mcpServers": {
+    "mail-mcp": {
+      "command": "uvx",
+      "args": ["mail-mcp"],
+      "env": {
+        "MAIL_IMAP_HOST": "imap.qq.com",
+        "MAIL_IMAP_PORT": "993",
+        "MAIL_IMAP_USERNAME": "your-email@qq.com",
+        "MAIL_IMAP_PASSWORD": "your-app-password",
+        "MAIL_IMAP_USE_SSL": "true",
+        "MAIL_SMTP_HOST": "smtp.qq.com",
+        "MAIL_SMTP_PORT": "587",
+        "MAIL_SMTP_USERNAME": "your-email@qq.com",
+        "MAIL_SMTP_PASSWORD": "your-app-password",
+        "MAIL_SMTP_USE_TLS": "true"
+      }
+    }
+  }
+}
 ```
 
-### 环境变量配置
-创建 `.env` 文件：
+启动 Claude Code 即可使用！`uvx` 会自动下载和运行 Mail MCP。
 
-```env
-# IMAP 服务器配置
-IMAP_HOST=imap.qiye.aliyun.com
-IMAP_PORT=993
-IMAP_USE_SSL=true
-IMAP_USERNAME=your_email@example.com
-IMAP_PASSWORD=your_password
+### 常见邮箱服务配置
 
-# SMTP 服务器配置
-SMTP_HOST=smtp.qiye.aliyun.com
-SMTP_PORT=465
-SMTP_USE_SSL=true
-SMTP_USERNAME=your_email@example.com
-SMTP_PASSWORD=your_password
+替换 `.mcp.json` 中的主机地址即可支持不同邮箱：
 
-# 服务器配置
-SERVER_HOST=localhost
-SERVER_PORT=8080
-LOG_LEVEL=INFO
-```
-
-### 配置示例
-以下是常见邮箱服务商的配置：
-
-#### 阿里云企业邮箱
-```env
-IMAP_HOST=imap.qiye.aliyun.com
-IMAP_PORT=993
-SMTP_HOST=smtp.qiye.aliyun.com
-SMTP_PORT=465
-```
-
-#### 腾讯企业邮箱
-```env
-IMAP_HOST=imap.exmail.qq.com
-IMAP_PORT=993
-SMTP_HOST=smtp.exmail.qq.com
-SMTP_PORT=465
-```
-
-#### 网易企业邮箱
-```env
-IMAP_HOST=imap.ym.163.com
-IMAP_PORT=993
-SMTP_HOST=smtp.ym.163.com
-SMTP_PORT=465
+#### QQ邮箱（默认）
+```json
+"MAIL_IMAP_HOST": "imap.qq.com",
+"MAIL_SMTP_HOST": "smtp.qq.com"
 ```
 
 #### Gmail
-```env
-IMAP_HOST=imap.gmail.com
-IMAP_PORT=993
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USE_SSL=false  # Gmail 使用 STARTTLS
+```json
+"MAIL_IMAP_HOST": "imap.gmail.com",
+"MAIL_SMTP_HOST": "smtp.gmail.com"
 ```
 
-## 使用方法
-
-### 启动服务器
-```bash
-# 方法1: 直接运行主程序
-python main.py
-
-# 方法2: 使用模块方式
-python -m mail_mcp.main
-
-# 方法3: 如果安装了包
-mail-mcp
+#### Outlook/Hotmail
+```json
+"MAIL_IMAP_HOST": "outlook.office365.com",
+"MAIL_SMTP_HOST": "smtp-mail.outlook.com"
 ```
 
-### MCP 工具列表
+#### 163邮箱
+```json
+"MAIL_IMAP_HOST": "imap.163.com",
+"MAIL_SMTP_HOST": "smtp.163.com"
+```
+
+### 获取应用密码
+1. **QQ邮箱**: 设置 → 账户 → 开启IMAP/SMTP → 获取授权码
+2. **Gmail**: Google账户 → 安全性 → 两步验证 → 应用密码
+3. **Outlook**: 账户设置 → 安全性 → 应用密码
+4. **163邮箱**: 设置 → POP3/IMAP/SMTP → 授权码
+
+### 开始使用
+配置完成后，启动 Claude Code 即可使用所有邮件功能！
+
+## MCP 工具列表
 
 #### 邮件接收工具
 

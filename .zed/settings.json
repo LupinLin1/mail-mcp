@@ -1,7 +1,6 @@
 {
-	"mcpServers": {
+	"context_servers": {
 		"task-master-ai": {
-			"type": "stdio",
 			"command": "npx",
 			"args": [
 				"-y",

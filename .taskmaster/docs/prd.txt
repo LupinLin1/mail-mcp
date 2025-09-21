@@ -1,191 +1,291 @@
-# 邮件MCP服务产品需求文档 (PRD)
+# Mail MCP Server 简化重构 PRD
 
-## 1. 项目概述
+## 项目概述
 
-### 1.1 项目目标
-开发一个最小化的邮件MCP (Model Context Protocol) 服务，支持基本的IMAP和SMTP协议功能，为Claude等AI助手提供简单的邮件收发能力。
+**项目名称**: Mail MCP Server v2.0 - AI Agent 邮件助手
+**版本**: 2.0.0
+**项目类型**: MCP 服务器重构
+**目标**: 将现有的复杂邮件 MCP 服务器简化为专门服务 AI Agent 的两功能邮件系统
 
-### 1.2 核心价值
-- 为AI助手提供基础的邮件读取和发送能力
-- 支持主流邮件服务商
-- 简单易用的API接口
+## 业务背景
 
-### 1.3 目标用户
-- 需要AI助手处理邮件的开发者
-- 自动化邮件处理场景
+现有的 Mail MCP Server 包含 12+ 个邮件工具，功能全面但对于 AI Agent 使用场景来说过于复杂。我们需要一个精简的邮件系统，专门用于 AI Agent 通过邮件接收命令并回复处理结果。
 
-## 2. 功能需求
+## 核心需求
 
-### 2.1 IMAP协议支持 (邮件接收)
+### 1. check 工具 - 邮件检查功能
 
-#### 2.1.1 基础连接功能
-- **服务器连接**: 支持IMAP服务器连接配置
-- **身份认证**: 支持用户名/密码认证
-- **SSL/TLS**: 支持安全连接
+**功能描述**: 检查邮箱中来自可信发件人的新未读邮件
 
-#### 2.1.2 邮件读取功能
-- **邮件列表**: 获取收件箱邮件列表
-- **邮件详情**: 获取单个邮件的完整内容
-- **邮件搜索**: 基础搜索功能
-- **邮件标记**: 标记已读/未读状态
+**输入参数**: 无（使用配置的可信邮箱列表）
 
-#### 2.1.3 邮件操作
-- **删除邮件**: 删除邮件
+**输出内容**:
+- 邮件 ID
+- 发件人地址
+- 邮件主题
+- 邮件正文（完整内容）
+- 附件列表（文件名）
+- 接收时间
 
-### 2.2 SMTP协议支持 (邮件发送)
+**业务规则**:
+- 只检查来自配置中 `TRUSTED_SENDERS` 列表的邮件
+- 只返回未读邮件
+- 按时间倒序排列（最新的在前）
+- 自动将检查到的邮件标记为已读
 
-#### 2.2.1 基础发送功能
-- **服务器连接**: 支持SMTP服务器连接配置
-- **身份认证**: 支持用户名/密码认证
-- **SSL/TLS**: 支持安全连接
-- **邮件发送**: 发送文本邮件
+**错误处理**:
+- IMAP 连接失败
+- 认证失败
+- 网络超时
+- 无权限访问邮箱
 
-#### 2.2.2 邮件格式支持
-- **纯文本邮件**: 基本文本邮件
-- **HTML邮件**: 支持HTML格式的邮件
-- **附件支持**: 支持添加附件
+### 2. reply 工具 - 邮件回复功能
 
-### 2.3 配置管理
+**功能描述**: 回复指定的邮件，支持附件和富文本
 
-#### 2.3.1 账户配置
-- **单账户支持**: 支持单个邮件账户
-- **账户配置**: 配置IMAP/SMTP服务器参数
-- **环境变量**: 通过环境变量配置敏感信息
+**输入参数**:
+- `message_id`: 要回复的邮件 ID（必填）
+- `subject`: 回复邮件主题（可选，默认为 "Re: 原主题"）
+- `body`: 回复正文内容（必填）
+- `attachments`: 附件文件路径列表（可选）
 
-## 3. 技术架构
+**输出内容**:
+- 发送成功/失败状态
+- 发送时间
+- 附件处理结果
 
-### 3.1 系统架构
+**业务规则**:
+- 自动识别原邮件的发件人作为回复收件人
+- 支持 HTML 和纯文本格式
+- 附件大小限制 25MB
+- 自动设置回复头信息
+
+**错误处理**:
+- 原邮件不存在
+- SMTP 连接失败
+- 附件文件不存在或过大
+- 发送失败重试机制
+
+## 配置需求
+
+### 新增配置项
+
+**可信发件人列表**:
 ```
-邮件MCP服务
-├── MCP协议层
-│   ├── 请求处理
-│   └── 错误处理
-├── 业务逻辑层
-│   ├── IMAP服务
-│   └── SMTP服务
-└── 基础设施层
-    ├── 网络连接
-    └── 配置管理
+TRUSTED_SENDERS=email1@domain.com,email2@domain.com,admin@company.com
 ```
 
-### 3.2 技术栈选择
-- **运行时**: Python 3.8+
-- **MCP框架**: fastmcp (快速MCP框架)
-- **IMAP库**: imaplib (Python内置)
-- **SMTP库**: smtplib (Python内置)
-- **邮件处理**: email标准库
-- **配置**: 环境变量
+**现有配置保持**:
+- IMAP 配置 (host, port, username, password, ssl)
+- SMTP 配置 (host, port, username, password, tls)
 
-### 3.3 简化数据模型
+## 技术规格
 
-#### 3.3.1 邮件消息
+### 1. 代码重构范围
+
+**保留模块**:
+- `imap_service.py` - IMAP 服务核心功能
+- `smtp_service.py` - SMTP 服务核心功能
+- `config.py` - 配置管理（需扩展）
+- `models.py` - 数据模型
+- `errors.py` - 错误处理
+- `utils.py` - 工具函数
+
+**重构模块**:
+- `main.py` - 移除现有 12 个工具，只保留 check 和 reply
+- `config.py` - 添加 TRUSTED_SENDERS 配置支持
+
+**移除功能**:
+- list_messages 工具
+- get_message 工具
+- search_messages 工具
+- mark_as_read 工具
+- list_unread_messages 工具
+- list_attachments 工具
+- download_attachments 工具
+- send_email 工具
+- send_email_with_attachments 工具
+- 其他管理工具
+
+### 2. 新工具实现细节
+
+**check 工具实现**:
 ```python
-from dataclasses import dataclass
-from typing import List, Optional
-
-@dataclass
-class EmailAttachment:
-    filename: str
-    content_type: str
-    size: int
-
-@dataclass
-class EmailMessage:
-    id: str
-    subject: str
-    from_address: str
-    to_addresses: List[str]
-    date: str
-    body_text: str
-    body_html: Optional[str]
-    attachments: List[EmailAttachment]
-    is_read: bool
+@self.mcp.tool()
+async def check() -> str:
+    """检查可信发件人的新未读邮件"""
+    # 1. 获取可信发件人列表
+    # 2. 搜索未读邮件
+    # 3. 过滤可信发件人
+    # 4. 获取完整邮件信息
+    # 5. 标记为已读
+    # 6. 返回格式化结果
 ```
 
-## 4. API接口设计
+**reply 工具实现**:
+```python
+@self.mcp.tool()
+async def reply(message_id: str, body: str, subject: str = None, attachments: list[str] = None) -> str:
+    """回复指定邮件"""
+    # 1. 获取原邮件信息
+    # 2. 构建回复邮件
+    # 3. 处理附件
+    # 4. 发送回复
+    # 5. 返回结果
+```
 
-### 4.1 MCP工具定义
+### 3. 数据格式规范
 
-#### 4.1.1 IMAP工具
-- `list_messages`: 获取邮件列表
-- `get_message`: 获取单个邮件详情
-- `search_messages`: 搜索邮件
-- `mark_as_read`: 标记邮件为已读
-- `delete_message`: 删除邮件
+**check 工具返回格式**:
+```json
+{
+  "success": true,
+  "emails": [
+    {
+      "id": "123",
+      "from": "user@example.com",
+      "subject": "Task Request",
+      "body": "Please process this task...",
+      "attachments": ["file1.pdf", "file2.doc"],
+      "received_time": "2024-01-15T10:30:00Z"
+    }
+  ],
+  "total_count": 1
+}
+```
 
-#### 4.1.2 SMTP工具
-- `send_email`: 发送邮件
-- `send_email_with_attachments`: 发送带附件的邮件
+**reply 工具返回格式**:
+```json
+{
+  "success": true,
+  "message": "回复发送成功",
+  "sent_time": "2024-01-15T10:35:00Z",
+  "attachments_processed": 2
+}
+```
 
-### 4.2 配置参数
-- `IMAP_HOST`: IMAP服务器地址
-- `IMAP_PORT`: IMAP服务器端口
-- `IMAP_USER`: IMAP用户名
-- `IMAP_PASSWORD`: IMAP密码
-- `SMTP_HOST`: SMTP服务器地址
-- `SMTP_PORT`: SMTP服务器端口
-- `SMTP_USER`: SMTP用户名
-- `SMTP_PASSWORD`: SMTP密码
+## 质量要求
 
-## 5. 安全要求
+### 1. 性能指标
+- check 工具响应时间 < 5秒
+- reply 工具发送时间 < 10秒
+- 支持并发请求处理
 
-### 5.1 数据安全
-- **加密传输**: 使用SSL/TLS加密
-- **环境变量**: 敏感信息通过环境变量配置
-- **最小权限**: 只提供必要的邮件操作权限
+### 2. 可靠性要求
+- 99.9% 可用性
+- 自动重试机制
+- 完整的错误日志记录
 
-### 5.2 安全最佳实践
-- **输入验证**: 基础输入验证
-- **错误处理**: 安全的错误信息处理
+### 3. 安全要求
+- 只处理可信发件人邮件
+- 敏感信息脱敏记录
+- 附件安全扫描
+- 防止邮件循环回复
 
-## 6. 性能要求
+## 测试需求
 
-### 6.1 响应时间
-- **邮件列表**: < 3秒
-- **邮件详情**: < 2秒
-- **邮件发送**: < 5秒
+### 1. 单元测试
+- check 工具各种场景测试
+- reply 工具各种场景测试
+- 配置加载和验证测试
+- 错误处理测试
 
-### 6.2 简单性原则
-- 单账户支持
-- 基础功能优先
-- 易于部署和配置
+### 2. 集成测试
+- 完整的邮件收发流程测试
+- 多邮箱服务商兼容性测试
+- 大附件处理测试
 
-## 7. 开发计划
+### 3. 性能测试
+- 并发请求处理能力
+- 大量邮件处理性能
+- 内存使用优化
 
-### 7.1 第一阶段：基础框架 (3天)
-- Python项目初始化
-- fastmcp框架集成
-- 环境配置
-- 基础服务结构
+## 部署要求
 
-### 7.2 第二阶段：IMAP功能 (3天)
-- IMAP连接和认证
-- 邮件列表获取
-- 邮件详情读取
-- 基础搜索功能
+### 1. 环境变量配置
+```env
+# IMAP 配置
+IMAP_HOST=imap.example.com
+IMAP_PORT=993
+IMAP_USERNAME=bot@example.com
+IMAP_PASSWORD=password
+IMAP_USE_SSL=true
 
-### 7.3 第三阶段：SMTP功能 (3天)
-- SMTP连接和认证
-- 邮件发送功能
-- 附件支持
+# SMTP 配置
+SMTP_HOST=smtp.example.com
+SMTP_PORT=587
+SMTP_USERNAME=bot@example.com
+SMTP_PASSWORD=password
+SMTP_USE_TLS=true
 
-### 7.4 第四阶段：完善和测试 (2天)
-- 错误处理优化
-- 基础测试
-- 文档编写
+# 可信发件人（新增）
+TRUSTED_SENDERS=admin@company.com,manager@company.com,support@company.com
+```
 
-## 8. 成功标准
+### 2. MCP 配置
+```json
+{
+  "mcpServers": {
+    "mail-agent": {
+      "command": "uvx",
+      "args": ["mail-mcp"],
+      "env": {
+        "IMAP_HOST": "imap.example.com",
+        "TRUSTED_SENDERS": "admin@company.com,manager@company.com"
+      }
+    }
+  }
+}
+```
 
-### 8.1 功能完整性
-- 能够成功连接邮件服务器
-- 能够读取和发送邮件
-- 支持基础搜索功能
+## 迁移计划
 
-### 8.2 易用性
-- 配置简单
-- API接口清晰
-- 错误处理友好
+### Phase 1: 核心重构
+1. 重构 main.py，移除现有工具
+2. 实现 check 和 reply 工具
+3. 扩展配置系统
 
-### 8.3 稳定性
-- 基础功能稳定
-- 能够处理常见错误情况
+### Phase 2: 测试和验证
+1. 编写单元测试
+2. 进行集成测试
+3. 性能测试优化
+
+### Phase 3: 文档和发布
+1. 更新 README 文档
+2. 更新安装指南
+3. 发布 v2.0 版本
+
+## 成功标准
+
+1. **功能完整性**: check 和 reply 工具正常工作
+2. **配置灵活性**: 支持多邮箱服务商和可信发件人配置
+3. **性能达标**: 满足响应时间要求
+4. **测试覆盖**: 单元测试覆盖率 > 80%
+5. **文档完善**: 用户能够快速配置和使用
+
+## 风险和缓解
+
+### 技术风险
+- **邮件服务商兼容性**: 在多个主流邮箱服务上测试
+- **大附件处理**: 实现流式处理和分块上传
+- **并发安全**: 使用连接池和锁机制
+
+### 业务风险
+- **邮件循环**: 实现发件人检查，避免回复自己
+- **垃圾邮件**: 严格的可信发件人验证
+- **数据安全**: 敏感信息加密和脱敏
+
+## 交付物
+
+1. 重构后的源代码
+2. 完整的单元测试套件
+3. 更新的项目文档
+4. 部署和配置指南
+5. 迁移指南（从 v1.x 到 v2.0）
+
+---
+
+**项目优先级**: 高
+**预计工期**: 2-3 周
+**负责团队**: 后端开发团队
+**审核人**: 技术负责人
