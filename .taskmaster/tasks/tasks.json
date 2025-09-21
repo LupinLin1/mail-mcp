@@ -9,7 +9,7 @@
         "testStrategy": "验证备份分支创建成功，确认所有核心文件保留完整，检查版本号更新正确",
         "priority": "high",
         "dependencies": [],
-        "status": "in-progress",
+        "status": "done",
         "subtasks": []
       },
       {
@@ -22,7 +22,7 @@
         "dependencies": [
           1
         ],
-        "status": "pending",
+        "status": "in-progress",
         "subtasks": []
       },
       {
@@ -134,7 +134,7 @@
     ],
     "metadata": {
       "created": "2025-09-21T15:44:14.269Z",
-      "updated": "2025-09-21T15:46:16.355Z",
+      "updated": "2025-09-21T15:57:04.371Z",
       "description": "Tasks for master context"
     }
   }
