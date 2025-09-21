@@ -231,14 +231,6 @@ class Config:
 
         return errors
 
-    def is_valid(self) -> bool:
-        """Check if configuration is valid"""
-        try:
-            self._validate_config()
-            return True
-        except ValueError:
-            return False
-
     def get_config_summary(self) -> Dict[str, Any]:
         """Get configuration summary (without sensitive data)"""
         return {

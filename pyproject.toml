@@ -5,17 +5,19 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mail-mcp"
 version = "2.0.0"
-description = "A powerful MCP server for email operations with IMAP and SMTP support, featuring automatic Claude Code integration"
+description = "High-performance MCP server for enterprise email management with trusted sender filtering, connection pooling, and intelligent caching"
 readme = "README.md"
 requires-python = ">=3.8"
-license = "MIT"
+license = {text = "MIT"}
 authors = [
     {name = "Mail MCP Team", email = "team@mail-mcp.dev"}
 ]
-keywords = ["mcp", "email", "imap", "smtp", "claude", "claude-code", "automation"]
+keywords = ["mcp", "email", "imap", "smtp", "claude", "claude-code", "automation", "trusted-senders", "performance", "security"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 5 - Production/Stable",
     "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.8",
     "Programming Language :: Python :: 3.9",
@@ -24,6 +26,8 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Communications :: Email",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Monitoring",
+    "Topic :: Internet :: WWW/HTTP :: Dynamic Content",
 ]
 
 dependencies = [
@@ -32,6 +36,7 @@ dependencies = [
     "aiohttp>=3.8.0",
     "click>=8.0.0",
     "requests>=2.25.0",
+    "psutil>=5.8.0",
 ]
 
 [project.optional-dependencies]

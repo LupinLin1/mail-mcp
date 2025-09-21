@@ -2,7 +2,6 @@
 Mail MCP Setup Tool - 自动化安装和配置工具
 """
 
-import os
 import sys
 import json
 import yaml

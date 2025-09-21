@@ -11,12 +11,26 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .imap_service import IMAPService
 from datetime import datetime
 
 from .config import Config
 from .models import EmailMessage, EmailAttachment
 from .utils import validate_email_address
+from .errors import (
+    SMTPError,
+    EmailReplyError,
+    NetworkError,
+    ValidationError,
+    FileSystemError,
+    retry_on_error,
+    handle_errors,
+    logger
+)
+from .performance import timer, get_global_monitor
 
 
 class SMTPService:
@@ -25,12 +39,19 @@ class SMTPService:
     # 附件大小限制（25MB）
     MAX_ATTACHMENT_SIZE = 25 * 1024 * 1024  # 25MB in bytes
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, connection_pool=None):
         self.config = config
         self.connection: Optional[smtplib.SMTP] = None
         self.connected = False
         self.connection_timeout = 30
         self.last_connection_attempt: Optional[datetime] = None
+        
+        # 连接池和性能监控
+        self.connection_pool = connection_pool
+        self.performance_monitor = get_global_monitor()
+        
+        # 如果使用连接池，则禁用直接连接管理
+        self.use_connection_pool = connection_pool is not None
         self.connection_stats = {
             'total_connections': 0,
             'successful_connections': 0,
@@ -481,3 +502,225 @@ class SMTPService:
                 'success': False,
                 'error': error_msg
             }
+    
+    @timer("smtp.reply_to_message", get_global_monitor())
+    @retry_on_error(
+        max_retries=2,
+        delay=1.0,
+        backoff_factor=1.5,
+        exceptions=(SMTPError, NetworkError, smtplib.SMTPException, socket.error)
+    )
+    @handle_errors()
+    async def reply_to_message(
+        self,
+        imap_service: 'IMAPService',
+        message_id: str,
+        body: str,
+        subject: Optional[str] = None,
+        attachments: Optional[List[str]] = None
+    ) -> Dict[str, Any]:
+        """
+        回复指定的邮件
+        
+        Args:
+            imap_service: IMAP服务实例，用于获取原邮件
+            message_id: 原邮件的ID
+            body: 回复邮件的正文
+            subject: 回复邮件的主题（可选，默认使用"Re: 原主题"）
+            attachments: 附件文件路径列表（可选）
+            
+        Returns:
+            Dict: 回复结果
+            
+        Raises:
+            EmailReplyError: 邮件回复失败
+            ValidationError: 参数验证失败
+            SMTPError: SMTP操作失败
+            NetworkError: 网络连接失败
+        """
+        logger.info(f"开始回复邮件: {message_id}")
+        
+        # 参数验证
+        if not message_id or not message_id.strip():
+            raise ValidationError(
+                "邮件ID不能为空",
+                details={"message_id": message_id}
+            )
+        
+        if not body or not body.strip():
+            raise ValidationError(
+                "回复内容不能为空",
+                details={"body_length": len(body) if body else 0}
+            )
+        
+        try:
+            # 获取原邮件
+            original_msg = await imap_service.get_message(message_id)
+            if not original_msg:
+                raise EmailReplyError(
+                    f'邮件不存在: {message_id}',
+                    details={"message_id": message_id}
+                )
+            
+            # 检查原邮件发件人地址是否有效
+            if not validate_email_address(original_msg.from_address):
+                raise ValidationError(
+                    '原邮件发件人地址无效',
+                    details={
+                        "from_address": original_msg.from_address,
+                        "message_id": message_id
+                    }
+                )
+            
+            # 构建回复主题
+            reply_subject = subject
+            if not reply_subject:
+                original_subject = original_msg.subject or "无主题"
+                if not original_subject.lower().startswith('re:'):
+                    reply_subject = f'Re: {original_subject}'
+                else:
+                    reply_subject = original_subject
+            
+            # 检测正文格式（HTML或纯文本）
+            is_html = '<' in body and '>' in body and any(tag in body.lower() for tag in ['<p>', '<div>', '<br>', '<html>', '<body>'])
+            
+            # 检查连接
+            if not self.connected:
+                connect_success = await self.connect()
+                if not connect_success:
+                    raise NetworkError(
+                        "无法连接到SMTP服务器",
+                        details={
+                            "host": self.config.smtp.host,
+                            "port": self.config.smtp.port,
+                            "use_ssl": self.config.smtp.use_ssl
+                        }
+                    )
+            
+            # 处理附件验证
+            attachment_parts = []
+            if attachments:
+                logger.info(f"验证 {len(attachments)} 个附件")
+                # 验证所有附件文件
+                invalid_files = []
+                valid_attachments = []
+                total_size = 0
+                
+                for file_path in attachments:
+                    validation = self._validate_attachment_file(file_path)
+                    if validation['valid']:
+                        valid_attachments.append(file_path)
+                        total_size += validation['file_size']
+                    else:
+                        invalid_files.append(validation['error'])
+                
+                if invalid_files:
+                    raise FileSystemError(
+                        '附件文件验证失败',
+                        details={
+                            "invalid_files": invalid_files,
+                            "valid_count": len(valid_attachments),
+                            "total_count": len(attachments)
+                        }
+                    )
+                
+                logger.info(f"附件验证通过，总大小: {total_size} 字节")
+            
+            # 创建回复邮件
+            if attachments:
+                msg = MIMEMultipart()
+                # 添加正文
+                msg.attach(MIMEText(body, 'html' if is_html else 'plain', 'utf-8'))
+            else:
+                msg = MIMEText(body, 'html' if is_html else 'plain', 'utf-8')
+            
+            # 设置邮件头
+            msg['Subject'] = reply_subject
+            msg['From'] = self.config.smtp.username
+            msg['To'] = original_msg.from_address
+            
+            # 设置回复头信息
+            if original_msg.message_id:
+                msg['In-Reply-To'] = f'<{original_msg.message_id}>'
+                msg['References'] = f'<{original_msg.message_id}>'
+            
+            # 处理抄送地址
+            cc_addresses = []
+            if original_msg.cc_addresses:
+                # 过滤掉当前发送者的地址
+                cc_addresses = [addr for addr in original_msg.cc_addresses 
+                              if addr.lower() != self.config.smtp.username.lower()]
+                if cc_addresses:
+                    msg['Cc'] = ', '.join(cc_addresses)
+            
+            # 添加附件
+            if attachments:
+                for file_path in valid_attachments:
+                    try:
+                        attachment = self._create_attachment_from_file(file_path)
+                        if attachment:
+                            msg.attach(attachment)
+                            attachment_parts.append(os.path.basename(file_path))
+                        else:
+                            raise FileSystemError(
+                                '无法创建附件',
+                                details={"file_path": file_path}
+                            )
+                    except Exception as e:
+                        raise FileSystemError(
+                            f'处理附件失败: {file_path}',
+                            details={"file_path": file_path},
+                            original_exception=e
+                        )
+            
+            # 发送邮件
+            recipients = [original_msg.from_address]
+            recipients.extend(cc_addresses)
+            
+            try:
+                self.connection.sendmail(self.config.smtp.username, recipients, msg.as_string())
+                logger.info(f"回复邮件发送成功到 {original_msg.from_address}")
+            except smtplib.SMTPException as e:
+                raise SMTPError(
+                    'SMTP发送失败',
+                    details={
+                        "recipients": recipients,
+                        "subject": reply_subject,
+                        "from": self.config.smtp.username
+                    },
+                    original_exception=e
+                )
+            
+            # 构建成功响应
+            result = {
+                'success': True,
+                'message': f'回复邮件发送成功到 {original_msg.from_address}',
+                'original_subject': original_msg.subject,
+                'reply_subject': reply_subject,
+                'recipient': original_msg.from_address,
+                'sent_time': datetime.now().isoformat(),
+                'body_format': 'html' if is_html else 'plain'
+            }
+            
+            if attachment_parts:
+                result['attachments'] = attachment_parts
+                result['attachment_count'] = len(attachment_parts)
+            
+            if cc_addresses:
+                result['cc_recipients'] = cc_addresses
+            
+            return result
+            
+        except (smtplib.SMTPException, socket.error) as e:
+            raise SMTPError(
+                f'SMTP操作失败: {str(e)}',
+                details={
+                    "operation": "reply_to_message",
+                    "message_id": message_id,
+                    "smtp_host": self.config.smtp.host
+                },
+                original_exception=e
+            )
+        except Exception:
+            # 其他未预期的错误会被handle_errors装饰器处理
+            raise

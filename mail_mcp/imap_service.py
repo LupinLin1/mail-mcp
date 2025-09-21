@@ -18,6 +18,17 @@ from .utils import (
     parse_email_addresses,
     parse_email_date
 )
+from .errors import (
+    IMAPError,
+    TrustedSenderError,
+    NetworkError,
+    retry_on_error,
+    handle_errors,
+    logger,
+    log_error_with_context
+)
+from .cache import EmailCache
+from .performance import timer, get_global_monitor
 
 
 class IMAPService:
@@ -27,7 +38,7 @@ class IMAPService:
     支持安全连接、重试机制、连接池管理和完整的错误处理
     """
 
-    def __init__(self, config: Config):
+    def __init__(self, config: Config, connection_pool=None, email_cache=None):
         self.config = config
         self.connection: Optional[imaplib.IMAP4_SSL] = None
         self.connected = False
@@ -43,6 +54,14 @@ class IMAPService:
             'connection_uptime': 0
         }
         self._connection_lock = asyncio.Lock()
+        
+        # 连接池和缓存
+        self.connection_pool = connection_pool
+        self.email_cache = email_cache or EmailCache()
+        self.performance_monitor = get_global_monitor()
+        
+        # 如果使用连接池，则禁用直接连接管理
+        self.use_connection_pool = connection_pool is not None
 
     async def connect(self) -> bool:
         """
@@ -343,12 +362,28 @@ class IMAPService:
 
         return messages
 
+    @timer("imap.get_message", get_global_monitor())
     async def get_message(self, message_id: str, folder: str = "INBOX") -> Optional[EmailMessage]:
         """Get specific message by ID"""
+        # 检查缓存
+        cached_email = await self.email_cache.get_email(message_id, folder)
+        if cached_email:
+            logger.debug(f"从缓存返回邮件: {message_id}")
+            self.performance_monitor.increment_counter("imap.email_cache_hits")
+            return cached_email
+        
+        self.performance_monitor.increment_counter("imap.email_cache_misses")
+        
         if not await self.select_folder(folder):
             return None
 
-        return await self._get_message_by_id(message_id, folder)
+        email = await self._get_message_by_id(message_id, folder)
+        
+        # 缓存邮件
+        if email:
+            await self.email_cache.cache_email(email, folder)
+        
+        return email
 
     async def _get_message_by_id(self, message_id: str, folder: str) -> Optional[EmailMessage]:
         """Get message by internal ID"""
@@ -795,3 +830,155 @@ class IMAPService:
         except Exception as e:
             print(f"Failed to download attachment '{filename}' from message {message_id}: {e}")
             return None
+
+    @timer("imap.check_trusted_emails", get_global_monitor())
+    @retry_on_error(
+        max_retries=3,
+        delay=1.0,
+        backoff_factor=2.0,
+        exceptions=(IMAPError, NetworkError, ConnectionError, socket.error, imaplib.IMAP4.error)
+    )
+    @handle_errors()
+    async def check_trusted_emails(self, trusted_senders: List[str]) -> List[EmailMessage]:
+        """
+        检查来自可信发件人的未读邮件，并自动标记为已读
+        
+        Args:
+            trusted_senders: 可信发件人邮箱地址列表
+            
+        Returns:
+            来自可信发件人的未读邮件列表，按时间降序排列（最新优先）
+            
+        Raises:
+            TrustedSenderError: 可信发件人列表为空或无效
+            IMAPError: IMAP操作失败
+            NetworkError: 网络连接失败
+        """
+        logger.info(f"开始检查来自 {len(trusted_senders)} 个可信发件人的邮件")
+        
+        if not trusted_senders:
+            raise TrustedSenderError(
+                "可信发件人列表为空",
+                details={"trusted_senders_count": 0}
+            )
+        
+        # 检查缓存
+        cached_result = await self.email_cache.get_trusted_check_result(trusted_senders)
+        if cached_result is not None:
+            logger.info(f"从缓存返回 {len(cached_result)} 封可信邮件")
+            self.performance_monitor.increment_counter("imap.cache_hits")
+            return cached_result
+        
+        self.performance_monitor.increment_counter("imap.cache_misses")
+        
+        try:
+            # 确保连接有效
+            await self.connect()
+            if not self.connected:
+                raise NetworkError(
+                    "无法连接到IMAP服务器",
+                    details={
+                        "host": self.config.imap.host,
+                        "port": self.config.imap.port,
+                        "use_ssl": self.config.imap.use_ssl
+                    }
+                )
+            
+            # 选择收件箱
+            typ, data = self.connection.select('INBOX')
+            if typ != 'OK':
+                raise IMAPError(
+                    "无法选择INBOX文件夹",
+                    details={"response": data}
+                )
+            
+            # 搜索未读邮件
+            typ, message_ids = self.connection.search(None, 'UNSEEN')
+            if typ != 'OK':
+                raise IMAPError(
+                    "搜索未读邮件失败",
+                    details={"response": message_ids}
+                )
+            
+            if not message_ids[0]:
+                logger.info("没有找到未读邮件")
+                return []
+            
+            message_id_list = message_ids[0].split()
+            trusted_emails = []
+            
+            logger.info(f"找到 {len(message_id_list)} 封未读邮件，开始筛选可信发件人")
+            
+            # 处理每个未读邮件
+            for msg_id in message_id_list:
+                try:
+                    # 获取完整邮件内容以提取发件人
+                    full_message = await self.get_message(msg_id.decode())
+                    if not full_message:
+                        logger.warning(f"无法获取邮件内容: {msg_id}")
+                        continue
+                    
+                    # 检查是否来自可信发件人
+                    from_addr = full_message.from_address
+                    if not from_addr:
+                        logger.warning(f"邮件 {msg_id} 缺少发件人信息")
+                        continue
+                    
+                    # 解析发件人邮箱地址
+                    parsed_addresses = parse_email_addresses(from_addr)
+                    if not parsed_addresses:
+                        logger.warning(f"无法解析发件人地址: {from_addr}")
+                        continue
+                    
+                    sender_email = parsed_addresses[0].lower()
+                    
+                    # 检查是否在可信发件人列表中（大小写不敏感）
+                    is_trusted = any(
+                        sender_email == trusted.strip().lower() 
+                        for trusted in trusted_senders
+                    )
+                    
+                    if is_trusted:
+                        logger.info(f"找到可信发件人邮件: {sender_email} - {full_message.subject}")
+                        
+                        # 标记为已读
+                        typ, response = self.connection.store(msg_id, '+FLAGS', '\\Seen')
+                        if typ != 'OK':
+                            logger.warning(f"标记邮件已读失败: {msg_id}, 响应: {response}")
+                        
+                        # 添加到结果列表
+                        trusted_emails.append(full_message)
+                
+                except Exception as e:
+                    log_error_with_context(
+                        e,
+                        context={
+                            "operation": "process_message",
+                            "message_id": msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
+                            "trusted_senders": trusted_senders
+                        }
+                    )
+                    continue
+            
+            # 按时间降序排序（最新优先）
+            trusted_emails.sort(key=lambda x: x.date or datetime.min, reverse=True)
+            
+            logger.info(f"成功找到 {len(trusted_emails)} 封来自可信发件人的邮件")
+            
+            # 缓存结果
+            await self.email_cache.cache_trusted_check_result(trusted_senders, trusted_emails)
+            
+            return trusted_emails
+            
+        except (imaplib.IMAP4.error, socket.error) as e:
+            raise IMAPError(
+                f"IMAP操作失败: {str(e)}",
+                details={
+                    "operation": "check_trusted_emails",
+                    "trusted_senders": trusted_senders
+                },
+                original_exception=e
+            )
+        except Exception:
+            # 其他未预期的错误会被handle_errors装饰器处理
+            raise

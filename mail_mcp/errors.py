@@ -187,6 +187,58 @@ class ProtocolError(MailMCPError):
         )
 
 
+class TrustedSenderError(MailMCPError):
+    """可信发件人相关错误"""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None, original_exception: Optional[Exception] = None):
+        super().__init__(
+            message=message,
+            code=ErrorCode.VALIDATION_INVALID_PARAMETER,
+            category=ErrorCategory.VALIDATION,
+            details=details,
+            original_exception=original_exception
+        )
+
+
+class EmailReplyError(MailMCPError):
+    """邮件回复错误"""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None, original_exception: Optional[Exception] = None):
+        super().__init__(
+            message=message,
+            code=ErrorCode.PROTOCOL_SMTP_ERROR,
+            category=ErrorCategory.PROTOCOL,
+            details=details,
+            original_exception=original_exception
+        )
+
+
+class IMAPError(MailMCPError):
+    """IMAP特定错误"""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None, original_exception: Optional[Exception] = None):
+        super().__init__(
+            message=message,
+            code=ErrorCode.PROTOCOL_IMAP_ERROR,
+            category=ErrorCategory.PROTOCOL,
+            details=details,
+            original_exception=original_exception
+        )
+
+
+class SMTPError(MailMCPError):
+    """SMTP特定错误"""
+
+    def __init__(self, message: str, details: Optional[Dict[str, Any]] = None, original_exception: Optional[Exception] = None):
+        super().__init__(
+            message=message,
+            code=ErrorCode.PROTOCOL_SMTP_ERROR,
+            category=ErrorCategory.PROTOCOL,
+            details=details,
+            original_exception=original_exception
+        )
+
+
 # 错误处理装饰器
 def handle_errors(default_return=None, log_errors=True):
     """错误处理装饰器"""

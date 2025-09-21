@@ -2,10 +2,8 @@
 Mail MCP Configuration Tool - 配置管理工具
 """
 
-import os
 import sys
 import yaml
-import json
 import click
 from pathlib import Path
 from typing import Optional, Dict, Any
