@@ -322,3 +322,227 @@ class EmailSearchCriteria:
             self.has_attachments is not None,
             self.message_id
         ])
+
+
+@dataclass
+class SearchRequest:
+    """
+    邮件搜索请求数据模型
+    
+    Attributes:
+        query: 搜索关键词
+        date_from: 开始日期 (YYYY-MM-DD格式)
+        date_to: 结束日期 (YYYY-MM-DD格式)
+        page: 页码 (默认1)
+        page_size: 每页大小 (默认20)
+        folder: 搜索的文件夹 (默认'INBOX')
+        sender: 发件人过滤
+        recipient: 收件人过滤
+        has_attachments: 是否有附件过滤
+    """
+    query: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    page: int = 1
+    page_size: int = 20
+    folder: str = "INBOX"
+    sender: Optional[str] = None
+    recipient: Optional[str] = None
+    has_attachments: Optional[bool] = None
+
+    def __post_init__(self):
+        """初始化后验证"""
+        if self.page < 1:
+            raise ValueError("Page must be at least 1")
+        if self.page_size < 1:
+            raise ValueError("Page size must be at least 1")
+        if self.page_size > 100:
+            raise ValueError("Page size cannot exceed 100")
+        
+        # 验证日期格式
+        if self.date_from:
+            try:
+                from datetime import datetime
+                datetime.strptime(self.date_from, '%Y-%m-%d')
+            except ValueError:
+                raise ValueError("date_from must be in YYYY-MM-DD format")
+        
+        if self.date_to:
+            try:
+                from datetime import datetime
+                datetime.strptime(self.date_to, '%Y-%m-%d')
+            except ValueError:
+                raise ValueError("date_to must be in YYYY-MM-DD format")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式，移除None值"""
+        result = asdict(self)
+        return {k: v for k, v in result.items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SearchRequest':
+        """从字典创建搜索请求对象"""
+        return cls(**data)
+
+    def to_json(self) -> str:
+        """转换为JSON字符串"""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'SearchRequest':
+        """从JSON字符串创建搜索请求对象"""
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+
+@dataclass
+class EmailResult:
+    """
+    邮件搜索结果项数据模型
+    
+    Attributes:
+        uid: 邮件唯一标识符
+        subject: 邮件主题
+        sender: 发件人
+        recipient: 收件人
+        date: 邮件日期
+        folder: 所在文件夹
+        summary: 邮件内容摘要 (约200字符)
+        has_attachments: 是否有附件
+        is_read: 是否已读
+        message_id: 邮件消息ID
+    """
+    uid: str
+    subject: str
+    sender: str
+    recipient: str
+    date: str
+    folder: str
+    summary: str
+    has_attachments: bool = False
+    is_read: bool = False
+    message_id: Optional[str] = None
+
+    def __post_init__(self):
+        """初始化后验证"""
+        if not self.uid:
+            raise ValueError("UID cannot be empty")
+        if not self.subject:
+            raise ValueError("Subject cannot be empty")
+        if not self.sender:
+            raise ValueError("Sender cannot be empty")
+        if not self.recipient:
+            raise ValueError("Recipient cannot be empty")
+        if not self.date:
+            raise ValueError("Date cannot be empty")
+        if not self.folder:
+            raise ValueError("Folder cannot be empty")
+        
+        # 限制摘要长度
+        if len(self.summary) > 200:
+            self.summary = self.summary[:197] + "..."
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        result = asdict(self)
+        return {k: v for k, v in result.items() if v is not None}
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'EmailResult':
+        """从字典创建邮件结果对象"""
+        return cls(**data)
+
+    def to_json(self) -> str:
+        """转换为JSON字符串"""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'EmailResult':
+        """从JSON字符串创建邮件结果对象"""
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+
+@dataclass
+class SearchResult:
+    """
+    邮件搜索结果数据模型
+    
+    Attributes:
+        total_count: 总结果数
+        current_page: 当前页码
+        total_pages: 总页数
+        page_size: 每页大小
+        emails: EmailResult列表
+        query: 搜索查询条件
+        search_time_ms: 搜索耗时 (毫秒)
+    """
+    total_count: int
+    current_page: int
+    total_pages: int
+    page_size: int
+    emails: List[EmailResult] = field(default_factory=list)
+    query: Optional[str] = None
+    search_time_ms: Optional[int] = None
+
+    def __post_init__(self):
+        """初始化后验证"""
+        if self.total_count < 0:
+            raise ValueError("Total count cannot be negative")
+        if self.current_page < 1:
+            raise ValueError("Current page must be at least 1")
+        if self.total_pages < 0:
+            raise ValueError("Total pages cannot be negative")
+        if self.page_size < 1:
+            raise ValueError("Page size must be at least 1")
+        if self.current_page > self.total_pages and self.total_pages > 0:
+            raise ValueError("Current page cannot exceed total pages")
+
+    def to_dict(self) -> Dict[str, Any]:
+        """转换为字典格式"""
+        result = {
+            'total_count': self.total_count,
+            'current_page': self.current_page,
+            'total_pages': self.total_pages,
+            'page_size': self.page_size,
+            'emails': [email.to_dict() for email in self.emails]
+        }
+        
+        if self.query is not None:
+            result['query'] = self.query
+        if self.search_time_ms is not None:
+            result['search_time_ms'] = self.search_time_ms
+            
+        return result
+
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'SearchResult':
+        """从字典创建搜索结果对象"""
+        emails = [EmailResult.from_dict(email_data) for email_data in data.get('emails', [])]
+        return cls(
+            total_count=data['total_count'],
+            current_page=data['current_page'],
+            total_pages=data['total_pages'],
+            page_size=data['page_size'],
+            emails=emails,
+            query=data.get('query'),
+            search_time_ms=data.get('search_time_ms')
+        )
+
+    def to_json(self) -> str:
+        """转换为JSON字符串"""
+        return json.dumps(self.to_dict(), ensure_ascii=False, indent=2)
+
+    @classmethod
+    def from_json(cls, json_str: str) -> 'SearchResult':
+        """从JSON字符串创建搜索结果对象"""
+        data = json.loads(json_str)
+        return cls.from_dict(data)
+
+    def has_more_pages(self) -> bool:
+        """检查是否还有更多页面"""
+        return self.current_page < self.total_pages
+
+    def has_previous_page(self) -> bool:
+        """检查是否有前一页"""
+        return self.current_page > 1

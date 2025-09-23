@@ -5,14 +5,17 @@ IMAP service implementation for Mail MCP server
 import asyncio
 import imaplib
 import email
-from datetime import datetime
+from datetime import datetime, timezone
 from email import policy
 from typing import List, Optional, Dict, Any
 import socket
 import ssl
+import re
+import time
+import math
 
 from .config import Config
-from .models import EmailMessage, EmailAttachment, EmailSearchCriteria
+from .models import EmailMessage, EmailAttachment, EmailSearchCriteria, SearchRequest, SearchResult, EmailResult
 from .utils import (
     decode_email_header,
     parse_email_addresses,
@@ -27,7 +30,7 @@ from .errors import (
     logger,
     log_error_with_context
 )
-from .cache import EmailCache
+
 from .performance import timer, get_global_monitor
 
 
@@ -57,7 +60,6 @@ class IMAPService:
         
         # 连接池和缓存
         self.connection_pool = connection_pool
-        self.email_cache = email_cache or EmailCache()
         self.performance_monitor = get_global_monitor()
         
         # 如果使用连接池，则禁用直接连接管理
@@ -365,23 +367,10 @@ class IMAPService:
     @timer("imap.get_message", get_global_monitor())
     async def get_message(self, message_id: str, folder: str = "INBOX") -> Optional[EmailMessage]:
         """Get specific message by ID"""
-        # 检查缓存
-        cached_email = await self.email_cache.get_email(message_id, folder)
-        if cached_email:
-            logger.debug(f"从缓存返回邮件: {message_id}")
-            self.performance_monitor.increment_counter("imap.email_cache_hits")
-            return cached_email
-        
-        self.performance_monitor.increment_counter("imap.email_cache_misses")
-        
         if not await self.select_folder(folder):
             return None
 
         email = await self._get_message_by_id(message_id, folder)
-        
-        # 缓存邮件
-        if email:
-            await self.email_cache.cache_email(email, folder)
         
         return email
 
@@ -467,8 +456,15 @@ class IMAPService:
                         attachments.append(attachment)
 
             # Check if message is read
-            flags = self.connection.fetch(message_id, '(FLAGS)')[1][0]
-            is_read = b'\\Seen' in flags
+            try:
+                status, flag_data = self.connection.fetch(message_id, '(FLAGS)')
+                if status == 'OK' and flag_data and flag_data[0]:
+                    flags = flag_data[0]
+                    is_read = br'\Seen' in flags
+                else:
+                    is_read = False
+            except Exception:
+                is_read = False
 
             return EmailMessage(
                 id=message_id,
@@ -862,13 +858,6 @@ class IMAPService:
                 details={"trusted_senders_count": 0}
             )
         
-        # 检查缓存
-        cached_result = await self.email_cache.get_trusted_check_result(trusted_senders)
-        if cached_result is not None:
-            logger.info(f"从缓存返回 {len(cached_result)} 封可信邮件")
-            self.performance_monitor.increment_counter("imap.cache_hits")
-            return cached_result
-        
         self.performance_monitor.increment_counter("imap.cache_misses")
         
         try:
@@ -965,9 +954,6 @@ class IMAPService:
             
             logger.info(f"成功找到 {len(trusted_emails)} 封来自可信发件人的邮件")
             
-            # 缓存结果
-            await self.email_cache.cache_trusted_check_result(trusted_senders, trusted_emails)
-            
             return trusted_emails
             
         except (imaplib.IMAP4.error, socket.error) as e:
@@ -982,3 +968,391 @@ class IMAPService:
         except Exception:
             # 其他未预期的错误会被handle_errors装饰器处理
             raise
+
+    @handle_errors(default_return=None, log_errors=True)
+    async def search_emails(self, request: SearchRequest) -> SearchResult:
+        """
+        搜索邮件的核心实现
+        
+        Args:
+            request: 搜索请求对象
+            
+        Returns:
+            SearchResult: 搜索结果对象
+        """
+        monitor = get_global_monitor()
+        search_start_time = time.time()
+        
+        try:
+            # 连接检查
+            if not await self.connect():
+                raise IMAPError("无法连接到IMAP服务器")
+            
+            # 构建搜索查询
+            search_query = self._build_search_query(request)
+            logger.info(f"搜索查询: {search_query}")
+            
+            # 获取需要搜索的文件夹列表（排除垃圾邮件等）
+            folders_to_search = self._get_search_folders(request.folder)
+            
+            all_message_ids = []
+            total_searched_folders = 0
+            
+            # 遍历文件夹进行搜索
+            for folder in folders_to_search:
+                if await self.select_folder(folder):
+                    try:
+                        status, message_ids = self.connection.search(None, search_query)
+                        if status == 'OK' and message_ids[0]:
+                            folder_ids = message_ids[0].split()
+                            # 为每个消息ID添加文件夹信息
+                            for msg_id in folder_ids:
+                                all_message_ids.append((msg_id, folder))
+                        total_searched_folders += 1
+                    except Exception as e:
+                        logger.warning(f"搜索文件夹 {folder} 时出错: {e}")
+                        continue
+            
+            logger.info(f"在 {total_searched_folders} 个文件夹中找到 {len(all_message_ids)} 条匹配邮件")
+            
+            # 按日期排序（最新邮件在前）
+            sorted_message_ids = await self._sort_messages_by_date(all_message_ids)
+            
+            # 计算分页
+            total_count = len(sorted_message_ids)
+            total_pages = math.ceil(total_count / request.page_size) if total_count > 0 else 0
+            
+            # 检查页码范围
+            if request.page > total_pages and total_pages > 0:
+                return SearchResult(
+                    total_count=total_count,
+                    current_page=request.page,
+                    total_pages=total_pages,
+                    page_size=request.page_size,
+                    emails=[],
+                    query=request.query,
+                    search_time_ms=int((time.time() - search_start_time) * 1000)
+                )
+            
+            # 获取当前页的邮件
+            start_idx = (request.page - 1) * request.page_size
+            end_idx = start_idx + request.page_size
+            page_message_ids = sorted_message_ids[start_idx:end_idx]
+            
+            # 获取邮件详细信息
+            emails = []
+            for msg_id, folder in page_message_ids:
+                try:
+                    email_result = await self._get_email_result(msg_id, folder, request.query)
+                    if email_result:
+                        emails.append(email_result)
+                except Exception as e:
+                    logger.warning(f"处理邮件 {msg_id} 时出错: {e}")
+                    continue
+            
+            search_time_ms = int((time.time() - search_start_time) * 1000)
+            
+            return SearchResult(
+                total_count=total_count,
+                current_page=request.page,
+                total_pages=total_pages,
+                page_size=request.page_size,
+                emails=emails,
+                query=request.query,
+                search_time_ms=search_time_ms
+            )
+            
+        except (imaplib.IMAP4.error, socket.error) as e:
+            raise IMAPError(
+                f"IMAP搜索失败: {str(e)}",
+                details={
+                    "operation": "search_emails",
+                    "query": request.query,
+                    "folder": request.folder
+                },
+                original_exception=e
+            )
+        except Exception:
+            raise
+
+    def _build_search_query(self, request: SearchRequest) -> str:
+        """
+        构建IMAP搜索查询字符串
+        
+        Args:
+            request: 搜索请求
+            
+        Returns:
+            str: IMAP搜索查询字符串
+        """
+        query_parts = []
+        
+        # 关键词搜索 - 同时搜索主题和正文
+        if request.query:
+            # 将查询关键词拆分并进行模糊搜索
+            keywords = request.query.strip().split()
+            keyword_queries = []
+            
+            for keyword in keywords:
+                # 对每个关键词同时搜索主题和正文
+                keyword_query = f'OR (SUBJECT "{keyword}") (TEXT "{keyword}")'
+                keyword_queries.append(keyword_query)
+            
+            if keyword_queries:
+                if len(keyword_queries) == 1:
+                    query_parts.append(keyword_queries[0])
+                else:
+                    # 多个关键词用AND连接
+                    combined_query = " ".join([f"({kq})" for kq in keyword_queries])
+                    query_parts.append(combined_query)
+        
+        # 发件人过滤
+        if request.sender:
+            query_parts.append(f'FROM "{request.sender}"')
+        
+        # 收件人过滤
+        if request.recipient:
+            query_parts.append(f'TO "{request.recipient}"')
+        
+        # 日期范围过滤
+        if request.date_from:
+            # 转换日期格式为IMAP格式
+            date_from = datetime.strptime(request.date_from, '%Y-%m-%d')
+            query_parts.append(f'SINCE "{date_from.strftime("%d-%b-%Y")}"')
+        
+        if request.date_to:
+            # 转换日期格式为IMAP格式  
+            date_to = datetime.strptime(request.date_to, '%Y-%m-%d')
+            query_parts.append(f'BEFORE "{date_to.strftime("%d-%b-%Y")}"')
+        
+        # 附件过滤
+        if request.has_attachments is not None:
+            if request.has_attachments:
+                # 搜索包含附件的邮件（通过MIME类型判断）
+                query_parts.append('OR (HEADER "Content-Type" "multipart/mixed") (HEADER "Content-Type" "multipart/related")')
+            else:
+                # 搜索不包含附件的邮件
+                query_parts.append('NOT OR (HEADER "Content-Type" "multipart/mixed") (HEADER "Content-Type" "multipart/related")')
+        
+        # 组合所有查询条件
+        if not query_parts:
+            return "ALL"  # 如果没有条件，返回所有邮件
+        
+        # 用AND连接所有条件
+        final_query = " ".join(query_parts)
+        return final_query
+
+    def _get_search_folders(self, requested_folder: str) -> List[str]:
+        """
+        获取需要搜索的文件夹列表
+        
+        Args:
+            requested_folder: 请求的文件夹
+            
+        Returns:
+            List[str]: 文件夹列表
+        """
+        # 如果指定了特定文件夹，只搜索该文件夹
+        if requested_folder and requested_folder != "INBOX":
+            return [requested_folder]
+        
+        # 默认搜索主要文件夹，排除垃圾邮件等
+        search_folders = ["INBOX"]
+        
+        try:
+            # 获取所有文件夹
+            status, folders = self.connection.list()
+            if status == 'OK':
+                for folder_line in folders:
+                    folder_info = folder_line.decode()
+                    # 提取文件夹名称
+                    folder_name = folder_info.split('"')[-2] if '"' in folder_info else folder_info.split()[-1]
+                    
+                    # 添加常见的发件箱文件夹
+                    if folder_name.lower() in ['sent', 'sent items', 'sent messages', '已发送', '发件箱']:
+                        search_folders.append(folder_name)
+        except Exception as e:
+            logger.warning(f"获取文件夹列表时出错: {e}")
+        
+        return search_folders
+
+    async def _sort_messages_by_date(self, message_ids: List[tuple]) -> List[tuple]:
+        """
+        按日期对邮件进行排序
+        
+        Args:
+            message_ids: (message_id, folder) 元组列表
+            
+        Returns:
+            List[tuple]: 按日期降序排序的邮件ID列表
+        """
+        message_dates = []
+        
+        for msg_id, folder in message_ids:
+            try:
+                if await self.select_folder(folder):
+                    # 获取邮件的日期信息
+                    status, msg_data = self.connection.fetch(msg_id, '(INTERNALDATE)')
+                    if status == 'OK' and msg_data and msg_data[0]:
+                        # 解析内部日期
+                        try:
+                            # IMAP fetch 返回格式可能不同，尝试多种方式解析
+                            if isinstance(msg_data[0], bytes):
+                                date_str = msg_data[0].decode()
+                            else:
+                                date_str = str(msg_data[0])
+                            
+                            # 提取日期部分
+                            date_match = re.search(r'INTERNALDATE "([^"]+)"', date_str)
+                            if date_match:
+                                try:
+                                    date_obj = datetime.strptime(date_match.group(1), '%d-%b-%Y %H:%M:%S %z')
+                                except ValueError:
+                                    # 尝试不带时区的格式
+                                    try:
+                                        date_obj = datetime.strptime(date_match.group(1), '%d-%b-%Y %H:%M:%S')
+                                        # 设置为UTC时间
+                                        date_obj = date_obj.replace(tzinfo=timezone.utc)
+                                    except ValueError:
+                                        # 如果都失败，使用当前时间
+                                        date_obj = datetime.now(timezone.utc)
+                            else:
+                                date_obj = datetime.now(timezone.utc)
+                            
+                            message_dates.append((msg_id, folder, date_obj))
+                        except Exception as e:
+                            logger.warning(f"解析邮件日期时出错: {e}")
+                            date_obj = datetime.now(timezone.utc)
+                            message_dates.append((msg_id, folder, date_obj))
+                    else:
+                        date_obj = datetime.now(timezone.utc)
+                        message_dates.append((msg_id, folder, date_obj))
+                else:
+                    date_obj = datetime.now(timezone.utc)
+                    message_dates.append((msg_id, folder, date_obj))
+            except Exception as e:
+                logger.warning(f"获取邮件 {msg_id} 日期时出错: {e}")
+                date_obj = datetime.now(timezone.utc)
+                message_dates.append((msg_id, folder, date_obj))
+        
+        # 按日期降序排序（最新邮件在前）
+        message_dates.sort(key=lambda x: x[2], reverse=True)
+        
+        # 返回 (msg_id, folder) 元组列表
+        return [(msg_id, folder) for msg_id, folder, _ in message_dates]
+
+    async def _get_email_result(self, msg_id: bytes, folder: str, query: Optional[str] = None) -> Optional[EmailResult]:
+        """
+        获取单个邮件的搜索结果信息
+        
+        Args:
+            msg_id: 邮件ID
+            folder: 文件夹名称
+            query: 搜索关键词（用于生成摘要）
+            
+        Returns:
+            Optional[EmailResult]: 邮件结果对象
+        """
+        try:
+            if not await self.select_folder(folder):
+                return None
+            
+            # 获取邮件基本信息
+            status, msg_data = self.connection.fetch(msg_id, '(RFC822.HEADER RFC822.TEXT)')
+            if status != 'OK':
+                return None
+            
+            # 解析邮件
+            header_data = msg_data[0][1] if len(msg_data[0]) > 1 else b''
+            text_data = msg_data[1][1] if len(msg_data) > 1 and len(msg_data[1]) > 1 else b''
+            
+            # 组合完整邮件
+            full_email_data = header_data + b'\r\n\r\n' + text_data
+            email_message = email.message_from_bytes(full_email_data, policy=policy.default)
+            
+            # 提取邮件信息
+            subject = decode_email_header(email_message.get('Subject', ''))
+            from_addr = parse_email_addresses(email_message.get('From', ''))[0] if parse_email_addresses(email_message.get('From', '')) else ''
+            to_addrs = parse_email_addresses(email_message.get('To', ''))
+            to_addr = to_addrs[0] if to_addrs else ''
+            date_str = parse_email_date(email_message.get('Date'))
+            message_id = email_message.get('Message-ID', '')
+            
+            # 检查是否有附件
+            has_attachments = False
+            for part in email_message.walk():
+                if part.get_content_disposition() == 'attachment':
+                    has_attachments = True
+                    break
+            
+            # 生成邮件摘要
+            summary = self._generate_email_summary(email_message, query)
+            
+            return EmailResult(
+                uid=msg_id.decode() if isinstance(msg_id, bytes) else str(msg_id),
+                subject=subject,
+                sender=from_addr,
+                recipient=to_addr,
+                date=date_str,
+                folder=folder,
+                summary=summary,
+                has_attachments=has_attachments,
+                is_read=False,  # 这里简化处理，实际可以通过FLAGS获取
+                message_id=message_id
+            )
+            
+        except Exception as e:
+            logger.warning(f"处理邮件 {msg_id} 时出错: {e}")
+            return None
+
+    def _generate_email_summary(self, email_message, query: Optional[str] = None) -> str:
+        """
+        生成邮件内容摘要
+        
+        Args:
+            email_message: 邮件对象
+            query: 搜索关键词
+            
+        Returns:
+            str: 邮件摘要（最多200字符）
+        """
+        try:
+            # 获取邮件正文
+            body_text = ""
+            
+            if email_message.is_multipart():
+                for part in email_message.walk():
+                    if part.get_content_type() == "text/plain":
+                        try:
+                            body_text = part.get_content()
+                            break
+                        except Exception:
+                            continue
+            else:
+                if email_message.get_content_type() == "text/plain":
+                    try:
+                        body_text = email_message.get_content()
+                    except Exception:
+                        body_text = ""
+            
+            # 清理文本
+            if body_text:
+                # 移除HTML标签
+                body_text = re.sub(r'<[^>]+>', '', body_text)
+                # 移除多余的空白字符
+                body_text = ' '.join(body_text.split())
+            
+            # 如果没有正文，使用主题作为摘要
+            if not body_text:
+                body_text = decode_email_header(email_message.get('Subject', '无主题'))
+            
+            # 截取前200字符
+            summary = body_text[:200]
+            if len(body_text) > 200:
+                summary = summary[:197] + "..."
+            
+            return summary
+            
+        except Exception as e:
+            logger.warning(f"生成邮件摘要时出错: {e}")
+            return "无法生成摘要"

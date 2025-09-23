@@ -64,6 +64,11 @@ def validate_email_address(email: str) -> bool:
     if len(email) > 254:  # RFC 5321 max length
         return False
 
+    # Handle "Name <email@address.com>" format
+    match = re.search(r'<(.+?)>', email)
+    if match:
+        email = match.group(1).strip()
+
     pattern = r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}$'
     return bool(re.match(pattern, email))
 

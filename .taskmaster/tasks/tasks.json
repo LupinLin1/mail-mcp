@@ -2,139 +2,85 @@
   "master": {
     "tasks": [
       {
-        "id": 1,
-        "title": "备份现有代码和配置清理",
-        "description": "创建完整的代码备份，清理项目结构，准备v2.0重构环境",
-        "details": "1. 创建 v1-backup 分支保存当前代码\n2. 在 main.py 中注释掉将要移除的9个工具函数\n3. 创建 v2-refactor 分支用于开发\n4. 更新 pyproject.toml 版本号为 2.0.0\n5. 清理测试文件，标记需要移除的测试用例\n6. 保留核心服务文件：imap_service.py, smtp_service.py, config.py, models.py, errors.py, utils.py",
-        "testStrategy": "验证备份分支创建成功，确认所有核心文件保留完整，检查版本号更新正确",
+        "id": 11,
+        "title": "设计搜索功能数据模型",
+        "description": "扩展现有的数据模型以支持邮件搜索功能，包括搜索请求参数和搜索结果响应格式",
+        "details": "在 mail_mcp/models.py 中创建新的数据类：\n1. SearchRequest 数据类：包含 query (搜索关键词), date_from (开始日期), date_to (结束日期), page (页码，默认1), page_size (每页大小，默认20) 等字段\n2. SearchResult 数据类：包含 total_count (总结果数), current_page (当前页码), total_pages (总页数), emails (EmailResult列表) 等字段\n3. EmailResult 数据类：包含 uid (邮件唯一标识符), subject (邮件主题), sender (发件人), recipient (收件人), date (邮件日期), folder (所在文件夹), summary (邮件内容摘要，约200字符), has_attachments (是否有附件) 等字段\n4. 确保所有数据类都有完整的验证逻辑、to_dict()和from_dict()方法以支持JSON序列化",
+        "testStrategy": "编写单元测试验证：\n1. 数据模型的初始化和字段验证\n2. 边界值测试（如page_size的最大值限制）\n3. JSON序列化和反序列化的正确性\n4. 数据类型转换的准确性",
         "priority": "high",
         "dependencies": [],
         "status": "done",
         "subtasks": []
       },
       {
-        "id": 2,
-        "title": "扩展配置系统支持可信发件人",
-        "description": "在现有配置系统基础上添加 TRUSTED_SENDERS 配置支持，实现可信发件人列表管理",
-        "details": "1. 在 config.py 中添加 TrustedSendersConfig 类：\n```python\n@dataclass\nclass TrustedSendersConfig:\n    senders: List[str]\n    \n    @classmethod\n    def from_env(cls) -> 'TrustedSendersConfig':\n        trusted_str = os.getenv('TRUSTED_SENDERS', '')\n        senders = [s.strip() for s in trusted_str.split(',') if s.strip()]\n        return cls(senders=senders)\n    \n    def validate(self) -> List[str]:\n        errors = []\n        if not self.senders:\n            errors.append('至少需要配置一个可信发件人')\n        for sender in self.senders:\n            if not validate_email_address(sender):\n                errors.append(f'无效的邮箱地址: {sender}')\n        return errors\n```\n2. 更新 Config 类添加 trusted_senders 属性\n3. 更新配置验证逻辑\n4. 添加环境变量示例到 .env.example",
-        "testStrategy": "编写单元测试验证可信发件人列表的解析、验证和错误处理，测试空列表、无效邮箱、多个邮箱等场景",
+        "id": 12,
+        "title": "实现IMAP搜索核心逻辑",
+        "description": "在IMAPService中实现邮件搜索的核心逻辑，支持多文件夹搜索和模糊匹配",
+        "details": "在 mail_mcp/imap_service.py 中实现新方法：\n1. async def search_emails(self, request: SearchRequest) -> SearchResult\n2. 实现搜索逻辑：\n   - 同时搜索INBOX和Sent文件夹（排除垃圾邮件文件夹）\n   - 使用IMAP SEARCH命令构建搜索查询：OR (SUBJECT \"keyword\") (TEXT \"keyword\")\n   - 支持日期范围筛选：SINCE date_from BEFORE date_to\n   - 实现模糊搜索：将关键词拆分并分别搜索\n3. 实现分页逻辑：\n   - 获取所有匹配的邮件ID列表\n   - 按日期降序排序（最新邮件在前）\n   - 根据page和page_size计算偏移量和限制\n   - 只获取当前页需要的邮件详细信息\n4. 生成邮件摘要：截取正文前200个字符，去除HTML标签\n5. 利用现有的connection_pool和email_cache优化性能",
+        "testStrategy": "编写集成测试验证：\n1. 多文件夹搜索的正确性\n2. 关键词匹配的准确性（主题、正文）\n3. 日期范围筛选功能\n4. 分页功能的正确性\n5. 排序功能（按日期降序）\n6. 摘要生成的准确性",
         "priority": "high",
         "dependencies": [
-          1
+          11
         ],
         "status": "done",
         "subtasks": []
       },
       {
-        "id": 3,
-        "title": "实现 check 工具核心逻辑",
-        "description": "开发检查可信发件人未读邮件的核心功能，包括过滤、获取和标记已读",
-        "details": "1. 在 imap_service.py 中添加 check_trusted_emails 方法：\n```python\nasync def check_trusted_emails(self, trusted_senders: List[str]) -> List[EmailMessage]:\n    await self.connect()\n    await self.authenticate()\n    \n    # 搜索未读邮件\n    self.connection.select('INBOX')\n    _, message_ids = self.connection.search(None, 'UNSEEN')\n    \n    trusted_emails = []\n    for msg_id in message_ids[0].split():\n        msg = await self.get_message_by_id(msg_id)\n        \n        # 检查是否来自可信发件人\n        from_addr = parse_email_addresses(msg.from_address)[0]\n        if from_addr.lower() in [s.lower() for s in trusted_senders]:\n            trusted_emails.append(msg)\n            # 标记为已读\n            self.connection.store(msg_id, '+FLAGS', '\\\\Seen')\n    \n    return trusted_emails\n```\n2. 处理附件信息提取\n3. 添加时间排序（最新优先）\n4. 实现错误处理和重试机制",
-        "testStrategy": "测试可信发件人过滤逻辑、未读邮件搜索、标记已读功能、空结果处理、连接失败恢复",
+        "id": 14,
+        "title": "创建搜索MCP工具",
+        "description": "在main.py中注册新的search MCP工具，集成到现有架构",
+        "details": "在 mail_mcp/main.py 的 register_tools() 方法中添加新工具：\n1. 使用 @self.mcp.tool() 装饰器注册 search 工具\n2. 工具签名：async def search(query: str, date_from: Optional[str] = None, date_to: Optional[str] = None, page: Optional[int] = 1, page_size: Optional[int] = 20) -> str\n3. 实现逻辑：\n   - 参数验证（query不能为空）\n   - 日期格式验证（YYYY-MM-DD）\n   - 创建SearchRequest对象\n   - 调用imap_service.search_emails()\n   - 格式化返回结果为JSON\n4. 错误处理：\n   - 使用现有的错误处理机制（MailMCPError, create_error_response）\n   - 记录搜索日志（使用logger）\n   - 处理IMAP服务未初始化的情况\n5. 遵循现有工具的代码风格和模式",
+        "testStrategy": "编写MCP工具测试：\n1. 工具注册和可用性测试\n2. 参数验证测试（空查询、无效日期格式）\n3. 正常搜索流程测试\n4. 错误处理测试（服务未初始化、网络错误）\n5. 返回格式验证（JSON格式正确性）",
         "priority": "high",
         "dependencies": [
-          2
+          12
         ],
         "status": "done",
         "subtasks": []
       },
       {
-        "id": 4,
-        "title": "实现 reply 工具核心逻辑",
-        "description": "开发邮件回复功能，支持获取原邮件信息、构建回复邮件和发送",
-        "details": "1. 在 smtp_service.py 中添加 reply_to_message 方法：\n```python\nasync def reply_to_message(\n    self,\n    imap_service: IMAPService,\n    message_id: str,\n    body: str,\n    subject: Optional[str] = None,\n    attachments: Optional[List[str]] = None\n) -> Dict[str, Any]:\n    # 获取原邮件\n    original_msg = await imap_service.get_message_by_id(message_id)\n    if not original_msg:\n        raise ValueError(f'邮件不存在: {message_id}')\n    \n    # 构建回复邮件\n    msg = MIMEMultipart()\n    msg['From'] = self.config.smtp.username\n    msg['To'] = original_msg.from_address\n    msg['Subject'] = subject or f'Re: {original_msg.subject}'\n    msg['In-Reply-To'] = f'<{message_id}>'\n    msg['References'] = f'<{message_id}>'\n    \n    # 添加正文\n    msg.attach(MIMEText(body, 'html' if '<' in body else 'plain'))\n    \n    # 处理附件\n    if attachments:\n        for file_path in attachments:\n            await self._attach_file(msg, file_path)\n    \n    # 发送邮件\n    await self.connect()\n    result = self.connection.send_message(msg)\n    return {'success': True, 'sent_time': datetime.now().isoformat()}\n```\n2. 实现附件处理和大小验证\n3. 添加回复头信息设置\n4. 处理HTML和纯文本格式识别",
-        "testStrategy": "测试原邮件获取、回复头信息设置、附件处理、发送失败重试、大附件拒绝、格式自动识别",
+        "id": 18,
+        "title": "编写搜索功能单元测试",
+        "description": "为搜索功能编写全面的单元测试，确保功能稳定性",
+        "details": "创建 tests/test_search_tool.py 文件，编写测试：\n1. 模型测试（test_search_models.py）：\n   - SearchRequest 验证测试\n   - SearchResult 序列化测试\n   - EmailResult 数据完整性测试\n2. IMAP搜索测试（test_imap_search.py）：\n   - Mock IMAP连接和响应\n   - 测试搜索查询构建\n   - 测试多文件夹搜索\n   - 测试分页逻辑\n3. MCP工具测试（test_search_tool.py）：\n   - 测试工具注册\n   - 测试参数验证\n   - 测试正常搜索流程\n   - 测试错误处理\n4. 性能测试（test_search_performance.py）：\n   - 测试大量结果处理\n   - 测试并发搜索\n   - 测试缓存效果\n5. 集成测试：\n   - 端到端搜索测试\n   - 与其他工具的兼容性测试",
+        "testStrategy": "测试覆盖率要求：\n1. 代码覆盖率 > 80%\n2. 所有关键路径必须覆盖\n3. 边界条件测试完整\n4. 异常处理测试充分\n5. 性能基准测试通过",
         "priority": "high",
         "dependencies": [
-          2
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 5,
-        "title": "重构 main.py 实现两个新工具",
-        "description": "移除现有的12个工具，实现新的 check 和 reply 两个精简工具",
-        "details": "1. 清理现有工具注册代码\n2. 实现 check 工具：\n```python\n@self.mcp.tool()\nasync def check() -> str:\n    '''检查可信发件人的新未读邮件'''\n    if not self.imap_service:\n        return json.dumps({'success': False, 'error': 'IMAP服务未初始化'})\n    \n    try:\n        trusted_senders = self.config.trusted_senders.senders\n        emails = await self.imap_service.check_trusted_emails(trusted_senders)\n        \n        result = {\n            'success': True,\n            'emails': [\n                {\n                    'id': msg.id,\n                    'from': msg.from_address,\n                    'subject': msg.subject,\n                    'body': msg.body,\n                    'attachments': [a.filename for a in msg.attachments],\n                    'received_time': msg.date\n                }\n                for msg in emails\n            ],\n            'total_count': len(emails)\n        }\n        return json.dumps(result, ensure_ascii=False)\n    except Exception as e:\n        return json.dumps({'success': False, 'error': str(e)})\n```\n3. 实现 reply 工具（类似结构）\n4. 更新服务初始化逻辑\n5. 移除未使用的导入",
-        "testStrategy": "端到端测试两个工具的完整流程、错误场景测试、JSON输出格式验证、服务未初始化处理",
-        "priority": "high",
-        "dependencies": [
-          3,
-          4
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 6,
-        "title": "编写单元测试套件",
-        "description": "为新的 check 和 reply 工具编写完整的单元测试，确保80%以上覆盖率",
-        "details": "1. 创建 tests/test_check_tool.py：\n   - 测试可信发件人过滤\n   - 测试未读邮件检查\n   - 测试标记已读功能\n   - 测试空结果处理\n   - 测试异常处理\n2. 创建 tests/test_reply_tool.py：\n   - 测试邮件回复基本功能\n   - 测试附件处理\n   - 测试主题生成\n   - 测试格式识别\n   - 测试错误场景\n3. 创建 tests/test_trusted_senders.py：\n   - 测试配置解析\n   - 测试邮箱验证\n   - 测试大小写处理\n4. 使用 pytest-mock 模拟 IMAP/SMTP 连接\n5. 配置 pytest-cov 生成覆盖率报告",
-        "testStrategy": "运行 pytest --cov=mail_mcp --cov-report=html，确保覆盖率>80%，所有测试通过",
-        "priority": "medium",
-        "dependencies": [
-          5
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 7,
-        "title": "实现错误处理和重试机制",
-        "description": "增强错误处理能力，实现自动重试机制和详细的错误日志",
-        "details": "1. 在 errors.py 中添加新的异常类：\n```python\nclass TrustedSenderError(Exception):\n    '''可信发件人相关错误'''\n    pass\n\nclass EmailReplyError(Exception):\n    '''邮件回复错误'''\n    pass\n```\n2. 实现重试装饰器：\n```python\ndef retry_on_failure(max_retries=3, delay=1, backoff=2):\n    def decorator(func):\n        async def wrapper(*args, **kwargs):\n            for attempt in range(max_retries):\n                try:\n                    return await func(*args, **kwargs)\n                except (ConnectionError, TimeoutError) as e:\n                    if attempt == max_retries - 1:\n                        raise\n                    await asyncio.sleep(delay * (backoff ** attempt))\n            return None\n        return wrapper\n    return decorator\n```\n3. 为关键操作添加重试机制\n4. 增强日志记录，包含详细的错误上下文\n5. 实现连接池管理避免频繁连接",
-        "testStrategy": "测试重试机制在不同失败场景下的行为、验证日志记录完整性、测试连接池复用",
-        "priority": "medium",
-        "dependencies": [
-          5
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 8,
-        "title": "性能优化和并发处理",
-        "description": "优化邮件检查和回复的性能，支持并发请求处理",
-        "details": "1. 实现连接池管理：\n```python\nclass ConnectionPool:\n    def __init__(self, max_connections=5):\n        self.pool = asyncio.Queue(maxsize=max_connections)\n        self.semaphore = asyncio.Semaphore(max_connections)\n    \n    async def acquire(self):\n        async with self.semaphore:\n            if self.pool.empty():\n                conn = await self._create_connection()\n            else:\n                conn = await self.pool.get()\n            return conn\n```\n2. 批量处理邮件检查，使用 asyncio.gather\n3. 实现邮件缓存机制减少重复获取\n4. 优化附件处理，使用流式读取\n5. 添加性能监控和指标收集\n6. 实现请求限流防止过载",
-        "testStrategy": "压力测试并发请求处理、测试连接池在高负载下的表现、验证缓存命中率、测试大附件流式处理",
-        "priority": "low",
-        "dependencies": [
-          6,
-          7
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 9,
-        "title": "更新文档和部署指南",
-        "description": "编写v2.0版本的完整文档，包括迁移指南和部署说明",
-        "details": "1. 更新 README.md：\n   - 移除旧工具说明\n   - 添加新工具使用示例\n   - 更新配置说明\n2. 创建 MIGRATION.md：\n   - v1.x 到 v2.0 迁移步骤\n   - 配置变更说明\n   - 工具对应关系\n3. 更新 .env.example：\n   - 添加 TRUSTED_SENDERS 示例\n   - 完善注释说明\n4. 创建 docs/deployment.md：\n   - Docker 部署方式\n   - systemd 服务配置\n   - 性能调优建议\n5. 更新 MCP 配置示例：\n```json\n{\n  \"mcpServers\": {\n    \"mail-agent\": {\n      \"command\": \"uvx\",\n      \"args\": [\"mail-mcp\"],\n      \"env\": {\n        \"IMAP_HOST\": \"imap.example.com\",\n        \"SMTP_HOST\": \"smtp.example.com\",\n        \"TRUSTED_SENDERS\": \"admin@company.com\"\n      }\n    }\n  }\n}\n```",
-        "testStrategy": "文档审查、配置示例验证、迁移步骤测试、确保所有示例代码可运行",
-        "priority": "low",
-        "dependencies": [
-          8
-        ],
-        "status": "done",
-        "subtasks": []
-      },
-      {
-        "id": 10,
-        "title": "集成测试和发布准备",
-        "description": "执行完整的集成测试，准备v2.0版本发布",
-        "details": "1. 配置多邮箱服务商测试环境：\n   - Gmail IMAP/SMTP\n   - QQ Mail\n   - Outlook\n   - 163 Mail\n2. 执行端到端测试场景：\n   - 接收命令邮件 -> 处理 -> 回复结果\n   - 多附件处理流程\n   - 错误恢复测试\n3. 性能基准测试：\n   - 测试响应时间是否满足要求\n   - 并发处理能力验证\n   - 内存使用监控\n4. 安全审查：\n   - 可信发件人验证逻辑\n   - 防循环回复机制\n   - 敏感信息处理\n5. 准备发布：\n   - 更新 CHANGELOG.md\n   - 打标签 v2.0.0\n   - 构建发布包\n   - 发布到 PyPI",
-        "testStrategy": "完整的集成测试报告、性能测试报告、安全审计报告、发布前检查清单验证",
-        "priority": "medium",
-        "dependencies": [
-          9
+          14
         ],
         "status": "in-progress",
+        "subtasks": []
+      },
+      {
+        "id": 19,
+        "title": "编写搜索功能文档",
+        "description": "创建搜索功能的使用文档和API文档",
+        "details": "创建文档：\n1. 更新 README.md：\n   - 添加搜索功能介绍\n   - 添加搜索工具使用示例\n   - 更新功能特性列表\n2. 创建 docs/search-api.md：\n   - 详细的API参数说明\n   - 请求和响应示例\n   - 错误码说明\n3. 代码注释（中文文档，英文代码注释）：\n   - 为所有新增函数添加docstring\n   - 添加类型注解\n   - 添加使用示例\n4. 创建使用指南：\n   - 基础搜索示例\n   - 高级搜索技巧\n   - 性能优化建议\n5. 更新CHANGELOG.md：\n   - 记录新增搜索功能\n   - 版本号更新说明",
+        "testStrategy": "文档验证：\n1. 代码示例可执行性验证\n2. API文档准确性验证\n3. 中英文文档一致性检查\n4. 文档完整性检查\n5. 用户反馈收集",
+        "priority": "medium",
+        "dependencies": [
+          18
+        ],
+        "status": "pending",
+        "subtasks": []
+      },
+      {
+        "id": 20,
+        "title": "部署和监控配置",
+        "description": "完成搜索功能的部署配置和监控设置",
+        "details": "部署和监控设置：\n1. 更新版本号：\n   - 更新 pyproject.toml 版本到 2.2.0\n   - 更新变更日志\n2. 性能监控配置：\n   - 在 performance_monitor 中添加搜索相关指标\n   - 监控搜索响应时间\n   - 监控搜索成功率\n   - 监控缓存命中率\n3. 日志配置：\n   - 添加搜索操作日志\n   - 记录搜索关键词（脱敏处理）\n   - 记录搜索耗时和结果数量\n4. 错误告警：\n   - 设置搜索失败告警阈值\n   - 配置性能下降告警\n5. 部署验证：\n   - 运行所有测试套件\n   - 验证向后兼容性\n   - 性能基准测试\n   - 生产环境验证清单",
+        "testStrategy": "部署验证：\n1. 回归测试（确保现有功能正常）\n2. 性能测试（确保不影响现有性能）\n3. 兼容性测试\n4. 监控指标验证\n5. 生产环境冒烟测试",
+        "priority": "medium",
+        "dependencies": [
+          19
+        ],
+        "status": "pending",
         "subtasks": []
       }
     ],
     "metadata": {
       "created": "2025-09-21T15:44:14.269Z",
-      "updated": "2025-09-21T16:50:00.374Z",
+      "updated": "2025-09-22T13:28:46.434Z",
       "description": "Tasks for master context"
     }
   }

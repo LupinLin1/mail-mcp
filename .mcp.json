@@ -1,24 +1,21 @@
 {
-	"mcpServers": {
-		"task-master-ai": {
-			"type": "stdio",
-			"command": "npx",
-			"args": [
-				"-y",
-				"--package=task-master-ai",
-				"task-master-ai"
-			],
-			"env": {
-				"ANTHROPIC_API_KEY": "YOUR_ANTHROPIC_API_KEY_HERE",
-				"PERPLEXITY_API_KEY": "YOUR_PERPLEXITY_API_KEY_HERE",
-				"OPENAI_API_KEY": "YOUR_OPENAI_KEY_HERE",
-				"GOOGLE_API_KEY": "YOUR_GOOGLE_KEY_HERE",
-				"XAI_API_KEY": "YOUR_XAI_KEY_HERE",
-				"OPENROUTER_API_KEY": "YOUR_OPENROUTER_KEY_HERE",
-				"MISTRAL_API_KEY": "YOUR_MISTRAL_KEY_HERE",
-				"AZURE_OPENAI_API_KEY": "YOUR_AZURE_KEY_HERE",
-				"OLLAMA_API_KEY": "YOUR_OLLAMA_API_KEY_HERE"
-			}
-		}
-	}
+  "mcpServers": {
+    "mail-mcp": {
+      "command": "mail-mcp",
+      "args": [],
+      "env": {
+        "IMAP_HOST": "imap.qq.com",
+        "IMAP_PORT": "993",
+        "IMAP_USERNAME": "yingke_20@qq.com",
+        "IMAP_PASSWORD": "qpenmibvbmrjdabj",
+        "IMAP_USE_SSL": "true",
+        "SMTP_HOST": "smtp.qq.com",
+        "SMTP_PORT": "465",
+        "SMTP_USERNAME": "yingke_20@qq.com",
+        "SMTP_PASSWORD": "qpenmibvbmrjdabj",
+        "SMTP_USE_SSL": "true",
+        "TRUSTED_SENDERS": "7585525@qq.com,lupin.lin@qq.com"
+      }
+    }
+  }
 }

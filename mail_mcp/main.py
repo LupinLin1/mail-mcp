@@ -7,6 +7,7 @@ import json
 import logging
 import sys
 from typing import Optional, List
+import anyio
 
 from fastmcp import FastMCP
 from dotenv import load_dotenv
@@ -14,8 +15,9 @@ from dotenv import load_dotenv
 from .config import Config
 from .imap_service import IMAPService
 from .smtp_service import SMTPService
+from .models import SearchRequest
 from .connection_pool import ConnectionPool
-from .cache import EmailCache
+
 from .performance import get_global_monitor
 from .errors import (
     MailMCPError,
@@ -45,7 +47,6 @@ class MailMCPServer:
         
         # 性能优化组件
         self.connection_pool: Optional[ConnectionPool] = None
-        self.email_cache: Optional[EmailCache] = None
         self.performance_monitor = get_global_monitor()
 
     async def setup_services(self):
@@ -61,23 +62,14 @@ class MailMCPServer:
                     health_check_interval=60  # 1分钟
                 )
                 
-                self.email_cache = EmailCache(
-                    max_emails=1000,
-                    max_message_content=500,
-                    email_ttl=1800,  # 30分钟
-                    content_ttl=3600  # 1小时
-                )
-                
                 # 启动性能优化组件
                 await self.connection_pool.start()
-                await self.email_cache.start()
                 await self.performance_monitor.start()
                 
                 # 初始化邮件服务（传入性能优化组件）
                 self.imap_service = IMAPService(
                     config=self.config, 
-                    connection_pool=self.connection_pool,
-                    email_cache=self.email_cache
+                    connection_pool=self.connection_pool
                 )
                 self.smtp_service = SMTPService(
                     config=self.config, 
@@ -103,8 +95,6 @@ class MailMCPServer:
         try:
             if self.connection_pool:
                 await self.connection_pool.stop()
-            if self.email_cache:
-                await self.email_cache.stop()
             if self.performance_monitor:
                 await self.performance_monitor.stop()
         except Exception as e:
@@ -176,7 +166,7 @@ class MailMCPServer:
                 error_response = create_error_response(e)
                 return json.dumps(error_response, ensure_ascii=False)
             except Exception as e:
-                logger.error(f"check工具发生未预期错误: {e}", exc_info=True)
+                logger.error(f"check工具��生未预期错误: {e}", exc_info=True)
                 error_response = create_error_response(e)
                 return json.dumps(error_response, ensure_ascii=False)
         
@@ -243,7 +233,7 @@ class MailMCPServer:
         
         @self.mcp.tool()
         async def performance_stats() -> str:
-            """获取性能统计信息，包括连接池、缓存和监控指标"""
+            """获取性能统计信息，包括连接池和监控指标"""
             logger.info("执行performance_stats工具：获取性能统计")
             
             try:
@@ -257,12 +247,6 @@ class MailMCPServer:
                     stats['connection_pool'] = self.connection_pool.get_stats()
                 else:
                     stats['connection_pool'] = {'status': 'not_initialized'}
-                
-                # 缓存统计
-                if self.email_cache:
-                    stats['email_cache'] = self.email_cache.get_stats()
-                else:
-                    stats['email_cache'] = {'status': 'not_initialized'}
                 
                 # 性能监控统计
                 if self.performance_monitor:
@@ -431,7 +415,134 @@ class MailMCPServer:
                 error_response = create_error_response(e)
                 return json.dumps(error_response, ensure_ascii=False)
 
-        logger.info("V2.0 MCP tools registered: check, reply, performance_stats, download_attachments")
+        @self.mcp.tool()
+        async def search(
+            query: str,
+            date_from: Optional[str] = None,
+            date_to: Optional[str] = None,
+            page: Optional[int] = 1,
+            page_size: Optional[int] = 20,
+            folder: Optional[str] = "INBOX",
+            sender: Optional[str] = None,
+            recipient: Optional[str] = None,
+            has_attachments: Optional[bool] = None
+        ) -> str:
+            """搜索邮件
+            
+            Args:
+                query: 搜索关键词
+                date_from: 开始日期 (YYYY-MM-DD)
+                date_to: 结束日期 (YYYY-MM-DD)
+                page: 页码，从1开始
+                page_size: 每页结果数量
+                folder: 搜索文件夹，默认为INBOX
+                sender: 发件人过滤
+                recipient: 收件人过滤
+                has_attachments: 是否有附件过滤
+                
+            Returns:
+                JSON格式的搜索结果
+            """
+            logger.info(f"执行search工具：搜索邮件，关键词: {query}")
+            
+            if not self.imap_service:
+                error_response = create_error_response(
+                    MailMCPError('IMAP服务未初始化，请检查配置')
+                )
+                return json.dumps(error_response, ensure_ascii=False)
+            
+            if not query or not query.strip():
+                error_response = create_error_response(
+                    MailMCPError('搜索关键词不能为空')
+                )
+                return json.dumps(error_response, ensure_ascii=False)
+            
+            try:
+                # 日期格式验证
+                if date_from and not self._validate_date_format(date_from):
+                    error_response = create_error_response(
+                        MailMCPError('��始日期格式错误，请使用 YYYY-MM-DD 格式')
+                    )
+                    return json.dumps(error_response, ensure_ascii=False)
+                
+                if date_to and not self._validate_date_format(date_to):
+                    error_response = create_error_response(
+                        MailMCPError('结束日期格式错误，请使用 YYYY-MM-DD 格式')
+                    )
+                    return json.dumps(error_response, ensure_ascii=False)
+                
+                # 创建搜索请求
+                search_request = SearchRequest(
+                    query=query.strip(),
+                    date_from=date_from,
+                    date_to=date_to,
+                    page=page or 1,
+                    page_size=page_size or 20,
+                    folder=folder or "INBOX",
+                    sender=sender,
+                    recipient=recipient,
+                    has_attachments=has_attachments
+                )
+                
+                # 执行搜索
+                search_result = await self.imap_service.search_emails(search_request)
+                
+                # 格式化结果
+                result = {
+                    'success': True,
+                    'query': search_result.query,
+                    'total_count': search_result.total_count,
+                    'current_page': search_result.current_page,
+                    'total_pages': search_result.total_pages,
+                    'page_size': search_result.page_size,
+                    'search_time_ms': search_result.search_time_ms,
+                    'emails': [
+                        {
+                            'uid': email.uid,
+                            'subject': email.subject,
+                            'sender': email.sender,
+                            'recipient': email.recipient,
+                            'date': email.date,
+                            'folder': email.folder,
+                            'summary': email.summary,
+                            'has_attachments': email.has_attachments,
+                            'is_read': email.is_read,
+                            'message_id': email.message_id
+                        }
+                        for email in search_result.emails
+                    ]
+                }
+                
+                logger.info(f"搜索完成，找到 {search_result.total_count} 条结果")
+                return json.dumps(result, ensure_ascii=False, indent=2)
+                
+            except MailMCPError as e:
+                log_error_with_context(e, context={
+                    "tool": "search",
+                    "query": query,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "page": page,
+                    "page_size": page_size,
+                    "folder": folder
+                })
+                error_response = create_error_response(e)
+                return json.dumps(error_response, ensure_ascii=False)
+            except Exception as e:
+                logger.error(f"search工具发生未预期错误: {e}", exc_info=True)
+                error_response = create_error_response(e)
+                return json.dumps(error_response, ensure_ascii=False)
+        
+        def _validate_date_format(self, date_str: str) -> bool:
+            """验证日期格式是否为 YYYY-MM-DD"""
+            try:
+                from datetime import datetime
+                datetime.strptime(date_str, '%Y-%m-%d')
+                return True
+            except ValueError:
+                return False
+
+        logger.info("V2.0 MCP tools registered: check, reply, performance_stats, download_attachments, search")
 
     async def run(self, host: str = "localhost", port: int = 8000):
         """Run the MCP server"""
@@ -465,30 +576,30 @@ async def main():
 
 def sync_main():
     """同步入口点，用于CLI脚本 - MCP stdio模式"""
-    async def async_main():
-        try:
-            # 创建直接的服务器实例
-            server = MailMCPServer()
+    try:
+        # 创建直接的服务器实例
+        server = MailMCPServer()
+        
+        # 同步运行async setup
+        async def setup():
             await server.setup_services()
             server.register_tools()
-            
-            logger.info("Starting Mail MCP server in stdio mode")
-            try:
-                # 对于stdio模式，明确指定transport为"stdio"
-                server.mcp.run(transport="stdio")
-            finally:
-                await server._cleanup_services()
+        
+        asyncio.run(setup())
+        
+        logger.info("Starting Mail MCP server in stdio mode")
+        
+        # 现在运行stdio服务器（这是同步的）
+        server.mcp.run(transport="stdio")
                 
-        except KeyboardInterrupt:
-            logger.info("Shutting down server...")
-            sys.exit(0)
-        except Exception as e:
-            logger.error(f"Server error: {e}")
-            sys.exit(1)
-    
-    # 运行异步主函数
-    asyncio.run(async_main())
+    except KeyboardInterrupt:
+        logger.info("Shutting down server...")
+        sys.exit(0)
+    except Exception as e:
+        logger.error(f"Server error: {e}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    sync_main()
+    server = MailMCPServer()
+    anyio.run(server.run)

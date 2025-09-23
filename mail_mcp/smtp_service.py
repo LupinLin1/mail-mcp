@@ -523,7 +523,7 @@ class SMTPService:
         回复指定的邮件
         
         Args:
-            imap_service: IMAP服务实例，用于获取原邮件
+            imap_service: IMAP服务实例，用于获取原邮件和标记已读状态
             message_id: 原邮件的ID
             body: 回复邮件的正文
             subject: 回复邮件的主题（可选，默认使用"Re: 原主题"）
@@ -537,6 +537,9 @@ class SMTPService:
             ValidationError: 参数验证失败
             SMTPError: SMTP操作失败
             NetworkError: 网络连接失败
+            
+        Note:
+            成功发送回复后，会自动将原邮件标记为已读状态
         """
         logger.info(f"开始回复邮件: {message_id}")
         
@@ -680,6 +683,19 @@ class SMTPService:
             try:
                 self.connection.sendmail(self.config.smtp.username, recipients, msg.as_string())
                 logger.info(f"回复邮件发送成功到 {original_msg.from_address}")
+                
+                # 自动标记原邮件为已读
+                try:
+                    await imap_service.mark_as_read(message_id)
+                    # 清除缓存以确保下次获取的是最新状态
+                    if hasattr(imap_service, 'email_cache'):
+                        cache_key = f"email:INBOX:{message_id}"
+                        await imap_service.email_cache.email_cache.delete(cache_key)
+                    logger.info(f"已自动标记原邮件 {message_id} 为已读")
+                except Exception as e:
+                    logger.warning(f"自动标记原邮件为已读失败: {e}")
+                    # 不影响回复的成功状态，只记录警告
+                
             except smtplib.SMTPException as e:
                 raise SMTPError(
                     'SMTP发送失败',
@@ -699,7 +715,8 @@ class SMTPService:
                 'reply_subject': reply_subject,
                 'recipient': original_msg.from_address,
                 'sent_time': datetime.now().isoformat(),
-                'body_format': 'html' if is_html else 'plain'
+                'body_format': 'html' if is_html else 'plain',
+                'marked_as_read': True  # 表示已自动标记为已读
             }
             
             if attachment_parts:

@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "mail-mcp": {
+      "command": "python",
+      "args": ["-m", "mail_mcp.main"],
+      "env": {}
+    }
+  }
+}
