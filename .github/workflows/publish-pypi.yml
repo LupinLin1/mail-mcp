@@ -9,7 +9,8 @@ on:
   workflow_dispatch:  # 允许手动触发
 
 permissions:
-  contents: read
+  contents: write  # 需要写权限来创建 GitHub Release
+  id-token: write  # 用于可信发布
 
 jobs:
   test:
